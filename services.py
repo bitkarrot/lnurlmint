@@ -201,10 +201,10 @@ async def _confirm_payment(
 #
 # _track_melt_start / _track_melt_end maintain the refcount under the
 # asyncio.Lock. _melt_in_flight is the skip predicate reconcile uses.
-# _melt_pay is the background task stub — Plan 04 replaces it with the
-# full tristate settlement (pay_invoice → check_payment_status →
-# finalize/restore/leave-pending). The `finally:` block clears the
-# in-flight entry even in the stub so the registry never leaks.
+# _melt_pay is the background tristate settlement task: pay_invoice →
+# on raise (or pending return) _confirm_payment → paid=True finalize,
+# paid=False restore, paid=None leave pending. The `finally:` block
+# always clears the in-flight entry so the registry never leaks (SEC-03).
 # ---------------------------------------------------------------------------
 
 
@@ -246,19 +246,88 @@ async def _melt_in_flight(payment_hash: str) -> bool:
 
 
 async def _melt_pay(note_ids: list[str], pr: str, decoded, mint: Mint) -> None:
-    """Background melt payment task — STUB (Plan 04 implements tristate settlement).
+    """Background melt payment task — tristate settlement (SEC-01, REC-01).
 
-    Plan 04 replaces this with the full confirm-before-burn flow:
-    pay_invoice → on PaymentError check_payment_status → paid=True
-    finalize_melt, paid=False restore, paid=None leave pending. The
-    `finally:` block clears the in-flight entry so the registry never
-    leaks even in the stub (SEC-03).
+    Pays the melt invoice and settles the note based on the tristate
+    outcome: paid=True → finalize (burn), paid=False → restore,
+    paid=None → leave pending. NEVER restores on a raise alone — every
+    restore path goes through _confirm_payment first (SEC-01). The
+    `finally:` block always clears the in-flight registry (SEC-03).
+
+    pay_invoice can return a pending Payment (not raise) if the backend
+    times out — we check payment.status and fall through to confirmation
+    if it isn't a clean success.
+
+    No logger call includes pr, k1, or preimage (SEC-05) — only
+    note_ids and payment_hash (both hashes/ids, not secrets).
     """
+    payment_hash = decoded.payment_hash
+    wallet_id = mint.wallet
     try:
-        logger.warning(
-            f"_melt_pay stub called for note_ids={note_ids} — "
-            "Plan 04 implements tristate settlement"
-        )
+        try:
+            payment = await lnbits_pay_invoice(
+                wallet_id=wallet_id,
+                payment_request=pr,
+                max_sat=decoded.amount_msat // 1000,
+                description="lnurlcash melt",
+                tag="lnurlmint",
+            )
+            if payment.status == PaymentState.SUCCESS.value:
+                await finalize_melt(note_ids, mint.id)
+                if decoded.has_payment_hash:
+                    await mark_melt_settled(payment_hash)
+                return
+            # pay_invoice returned a pending Payment (timeout) — fall
+            # through to confirmation via _confirm_payment.
+            raise PaymentError("Payment timed out", status="pending")
+        except PaymentError as exc:
+            if not decoded.has_payment_hash:
+                logger.error(
+                    f"melt {note_ids}: error paying invoice, nothing to "
+                    "confirm against - left pending"
+                )
+                return
+            completed = await _confirm_payment(payment_hash, wallet_id)
+            if completed is None:
+                logger.error(
+                    f"melt {note_ids}: could not confirm payment status "
+                    "after retries - left pending"
+                )
+                return
+            if not completed:
+                logger.info(
+                    f"melt {note_ids}: confirmed not paid - restoring"
+                )
+                await restore(note_ids, mint.id)
+                return
+            # Confirmed paid despite the raise — finalize.
+            await finalize_melt(note_ids, mint.id)
+            if decoded.has_payment_hash:
+                await mark_melt_settled(payment_hash)
+            return
+        except Exception as exc:
+            if not decoded.has_payment_hash:
+                logger.error(
+                    f"melt {note_ids}: unexpected error - left pending: {exc}"
+                )
+                return
+            completed = await _confirm_payment(payment_hash, wallet_id)
+            if completed is None:
+                logger.error(
+                    f"melt {note_ids}: could not confirm after unexpected "
+                    f"error - left pending: {exc}"
+                )
+                return
+            if not completed:
+                logger.info(
+                    f"melt {note_ids}: confirmed not paid after unexpected "
+                    f"error - restoring"
+                )
+                await restore(note_ids, mint.id)
+                return
+            await finalize_melt(note_ids, mint.id)
+            if decoded.has_payment_hash:
+                await mark_melt_settled(payment_hash)
+            return
     finally:
-        if decoded.has_payment_hash:
-            await _track_melt_end(decoded.payment_hash)
+        await _track_melt_end(payment_hash)
