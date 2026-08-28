@@ -331,3 +331,78 @@ async def _melt_pay(note_ids: list[str], pr: str, decoded, mint: Mint) -> None:
             return
     finally:
         await _track_melt_end(payment_hash)
+
+
+# ---------------------------------------------------------------------------
+# Background reconciliation (REC-02)
+#
+# reconcile_pending_melts resolves every note left pending by a crashed
+# or restarted melt. It skips in-flight melts (SEC-03 — prevents
+# restoring a note while the HTLC is still being sent), resolves
+# stranded notes with a single-attempt confirmation (delays=()), and
+# logs+leaves pending for unconfirmable melts (NEVER auto-restores —
+# that would risk a double-spend if the HTLC is actually in flight).
+# boot_reconcile is a one-shot at startup, guarded against exceptions.
+# ---------------------------------------------------------------------------
+
+
+async def reconcile_pending_melts() -> None:
+    """Resolve every note left pending by a crashed/restarted melt.
+
+    For each pending melt: skip if in-flight (SEC-03), resolve the
+    wallet_id via mint_id → mints.wallet, confirm with a single attempt
+    (delays=()), finalize on paid=True, restore on paid=False, and
+    log+leave pending on paid=None (NEVER auto-restore unconfirmable).
+
+    No logger call includes pr, k1, or preimage (SEC-05) — only
+    note_ids and payment_hash (both hashes/ids, not secrets).
+    """
+    pending = await pending_melts()
+    for payment_hash, note_ids in pending.items():
+        if await _melt_in_flight(payment_hash):
+            continue  # skip live attempts (SEC-03)
+        # Resolve wallet_id for check_transaction_status.
+        mint_id = await get_mint_id_for_note(note_ids[0])
+        if mint_id is None:
+            logger.error(
+                f"reconcile: could not find mint for note {note_ids[0]}"
+            )
+            continue
+        mint = await get_mint_by_id(mint_id)
+        if mint is None:
+            logger.error(
+                f"reconcile: mint {mint_id} not found for note {note_ids[0]}"
+            )
+            continue
+        completed = await _confirm_payment(payment_hash, mint.wallet, delays=())
+        if completed is None:
+            logger.error(
+                f"reconcile: melt {note_ids} still unconfirmed - left pending"
+            )
+            continue  # NOT auto-restore — operator must investigate
+        if completed:
+            await finalize_melt(note_ids, mint.id)
+            await mark_melt_settled(payment_hash)
+            logger.info(
+                f"reconcile: melt {note_ids} confirmed paid - finalized"
+            )
+        else:
+            await restore(note_ids, mint.id)
+            logger.info(
+                f"reconcile: melt {note_ids} confirmed not paid - restored"
+            )
+
+
+async def boot_reconcile() -> None:
+    """One-shot reconcile at boot. Guarded against exceptions.
+
+    Runs in lnurlmint_start as an asyncio.create_task before the
+    periodic reconcile task is registered — resolves stranded notes
+    from a crashed process immediately on startup (REC-02). Exceptions
+    are caught and logged so a boot-reconcile failure never blocks
+    startup.
+    """
+    try:
+        await reconcile_pending_melts()
+    except Exception as exc:
+        logger.error(f"boot reconcile failed: {exc}")
