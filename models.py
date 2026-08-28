@@ -5,7 +5,7 @@ class Config) — LNbits pins pydantic 1.10.26.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, root_validator, validator
 
@@ -208,3 +208,78 @@ class MeltRecord(BaseModel):
     @validator("created_at", pre=True)
     def _parse_created_at(cls, v):
         return _parse_created_at(v)
+
+
+# ---------------------------------------------------------------------------
+# LNURL wire models (Phase 2 — LUD-06 payRequest + LUD-03 withdrawRequest)
+#
+# These pydantic v1 models serialize the JSON responses returned by the
+# LNURL endpoints (Plans 02-03). They use Literal tag fields for protocol
+# conformance (LUD-06 "payRequest", LUD-03 "withdrawRequest"). No model
+# carries a spendable credential — only hashes and public values.
+# ---------------------------------------------------------------------------
+
+
+class LnurlPayResponse(BaseModel):
+    """LUD-06 payRequest response — advertises the mint flow.
+
+    Returned by GET /lnurlmint/lnurlp/{mint_id}. The wallet fetches an
+    invoice from the callback URL to mint a bearer note. `withdrawLink`
+    points to the informational /w endpoint so the wallet can learn the
+    withdraw flow after paying. `commentAllowed` is the max comment
+    length (LUD-12), defaulting to 64.
+    """
+
+    tag: Literal["payRequest"] = "payRequest"
+    callback: str
+    minSendable: int
+    maxSendable: int
+    metadata: str
+    withdrawLink: str
+    commentAllowed: int = 64
+
+
+class LnurlPayActionResponse(BaseModel):
+    """LUD-06 payRequest callback response — the invoice to pay.
+
+    Returned by GET /lnurlmint/p/cb/{mint_id}. `pr` is the BOLT-11
+    invoice. `disposable` is always False (the invoice can be retried).
+    `verify` is the verify URL (LUD-21), included only for
+    comment-protected mints (Phase 4).
+    """
+
+    pr: str
+    disposable: Literal[False] = False
+    verify: Optional[str] = None
+
+
+class LnurlWithdrawResponse(BaseModel):
+    """LUD-03 withdrawRequest response — advertises the melt/redeem flow.
+
+    Returned by GET /lnurlmint/w/{mint_id}. Purely informational: tells
+    the wallet the callback URL, the k1 (note hash, never the spendable
+    credential), and the min/max withdrawable amounts. `mintPubkey` is
+    the mint's secp256k1 public key for offline verification (Phase 5).
+    """
+
+    tag: Literal["withdrawRequest"] = "withdrawRequest"
+    callback: str
+    k1: str
+    minWithdrawable: int
+    maxWithdrawable: int
+    defaultDescription: str = ""
+    mintPubkey: Optional[str] = None
+
+
+class WithdrawSuccessResponse(BaseModel):
+    """LUD-03 withdraw callback success response.
+
+    Returned by GET /lnurlmint/w/cb/{mint_id} after accepting a melt.
+    `status` is always "OK". `sig`/`sig2` are recoverable signatures
+    over the new note(s) for offline verification (Phase 5), included
+    only on rotate/split/merge — melt returns just `{"status":"OK"}`.
+    """
+
+    status: Literal["OK"] = "OK"
+    sig: Optional[str] = None
+    sig2: Optional[str] = None
