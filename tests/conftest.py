@@ -83,6 +83,14 @@ def fake_invoice(amount_msat: int, payment_hash: Optional[str] = None) -> str:
     )
 
 
+def fresh_secret() -> tuple[str, str]:
+    """A (k1, h) pair for LUD-25's WALLET-generated rotate/split/merge
+    secret: k1 is what a real wallet would keep and never transmit,
+    h = sha256(k1) hex is what goes on the /w/cb request as h/h2."""
+    secret = urandom(32).hex()
+    return secret, sha256(bytes.fromhex(secret)).hexdigest()
+
+
 class FakeNode:
     """Test double that monkeypatches LNbits' payment services.
 
