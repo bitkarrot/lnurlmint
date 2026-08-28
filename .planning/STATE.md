@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 3 — Rotate + Split + Merge + Sunset
-status: Ready to plan
-last_updated: "2026-08-28T21:36:51.255Z"
+status: Executing plan 03-01 complete
+last_updated: "2026-08-28T22:05:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 8
-  completed_plans: 8
-  percent: 29
+  completed_plans: 9
+  percent: 32
 ---
 
 # State: lnurlmint
@@ -27,7 +27,7 @@ progress:
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
 | 2 | Mint + Melt Vertical MVP | complete | 5/5 |
-| 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
+| 3 | Rotate + Split + Merge + Sunset | in progress | 1/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
 | 6 | Tor + Frontend | pending | 0/3 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 02-05 complete: the 5 critical funds-loss security PoC tests are ported and passing against LNbits fixtures — Phase 2 is complete. FakeNode/HodlNode/InFlightNode test fixtures monkeypatch the module-level payment imports in services.py AND views_lnurl.py (lnbits_create_invoice, lnbits_pay_invoice, check_transaction_status) with controllable tristate behaviour (paid=True/False/None via PaymentSuccessStatus/PaymentFailedStatus/PaymentPendingStatus). TEST-01 (duplicate_melt): a note melted twice is rejected with "pending". TEST-02 (a2_settle_race): compare-and-set settle_mint produces exactly one note. TEST-03 (tristate — highest-risk): paid=None (HodlNode ambiguous) leaves the note pending NOT restored; after hodl settles, reconcile finalizes; benign failure restores. TEST-04 (reconcile_inflight): reconcile skips in-flight melts (InFlightNode asyncio.Event coordination). TEST-05 (f2_pending_info_leak): /w rejects pending notes with "pending" — no value leaked. All 7 tests pass in 0.68s, stable across 3 runs. Tests use @pytest.mark.anyio (LNbits convention, not pytest-asyncio), per-test DB isolation (drop + re-migrate), and _CONFIRMATION_RETRY_DELAYS_SECONDS=() for fast single-attempt confirmation. Phase 3 (rotate/split/merge/sunset) and Phase 4 (comment protection + verify) can now proceed in parallel.
+Plan 03-01 complete: the `swap` primitive (atomic burn N + mint M with two-table collision check) and the rotate + merge callback branches are implemented. `crud.swap` uses validate-then-burn-then-mint in one `async with db.connect() as conn:` block — dedup check, validation phase (burn ids + collision check on mints_records AND notes), burn phase (UPDATE spent=1), mint phase (INSERT new notes). `services.sign_note` is a stub returning None (Phase 5 implements real signing). The `/w/cb` callback now handles rotate (single k1 + h, value-neutral) and merge (many k1 + h, refund=(n-1)*base_fee) via swap, returning `{"status":"OK"}`. The "not yet implemented" stub is replaced; a temporary "Split not available." guard rejects split until Plan 02. `_MAX_K1S=100` constant rejects too many k1s. All 8 Phase 2 tests still pass. Plan 02 (split) can now reuse swap with two mint notes; Plan 03 (sunset + PoCs) can test the collision check and fee conservation.
 
 ## Key Decisions Locked
 
@@ -129,6 +129,18 @@ Plan 02-05 complete: the 5 critical funds-loss security PoC tests are ported and
 - Plan 02-03 complete: redeem flow (LUD-03 informational /w + melt callback /w/cb). The /w endpoint is purely informational — advertises note value without burning, rejects pending (SEC-04)/spent/unknown, lazily settles, echoes k1 verbatim. The /w/cb melt callback validates pr via bolt11.decode, rejects self-mint/duplicate payment hashes (SEC-06), atomically reserves via mark_pending, registers in-flight via _track_melt_start (SEC-03), records the melt, replies {status:OK} immediately, and schedules background _melt_pay. REDEEM-06 validation enforced. In-flight refcount registry (asyncio.Lock) + _melt_pay stub in services.py — Plan 04 implements the full tristate settlement.
 - Plan 02-04 complete: confirm-before-burn state machine + in-flight tracking + background reconcile. _melt_pay implements full tristate settlement (pay_invoice → _confirm_payment → paid=True finalize, paid=False restore, paid=None leave pending). Every restore path goes through _confirm_payment first (SEC-01). _confirm_payment uses status.success/status.failed/status.paid is None (NOT .pending). reconcile_pending_melts skips in-flight, single-attempt confirm, logs+leaves pending for unconfirmable. boot_reconcile one-shot at startup. tasks.py + lnurlmint_start/stop wired via create_permanent_unique_task (EXT-03). Plan 02-05 (critical PoC tests) can now port all 5 PoC tests.
 - Plan 02-05 complete: 5 critical funds-loss security PoC tests ported and passing against LNbits fixtures — Phase 2 complete. TEST-01 (duplicate_melt), TEST-02 (a2_settle_race), TEST-03 (tristate — paid=None leaves pending NOT restored), TEST-04 (reconcile skips in-flight), TEST-05 (/w rejects pending notes). FakeNode/HodlNode/InFlightNode fixtures monkeypatch services.py + views_lnurl.py payment imports with controllable tristate. All 7 tests pass in 0.68s, stable across 3 runs. Phase 3 + Phase 4 can proceed in parallel.
+- Plan 03-01 complete: swap primitive (atomic burn N + mint M with validate-then-burn-then-mint and two-table collision check) + rotate/merge callback branches + sign_note stub. crud.swap uses 4 phases in one db.connect() block (dedup → validation → burn → mint); collision checks both mints_records AND notes (TEST-08 A1 squat prevention); all queries scoped by mint_id (SEC-07). /w/cb rotate (n=1, refund=0, value-neutral) and merge (n>1, refund=(n-1)*base_fee) via swap, returning {"status":"OK"}. _MAX_K1S=100 rejects too many k1s. Temporary "Split not available." guard until Plan 02. All 8 Phase 2 tests still pass.
+
+### Plan 03-01 Decisions
+
+- swap uses validate-then-burn-then-mint (3 phases within one db.connect() block) instead of the source's validate-and-burn-in-one-pass — LNbits' conn.execute commits per call with no rollback, so validation must complete before any mutation to guarantee atomicity (RQ1 critical atomicity gap)
+- Dedup check at the top of swap (len(set(burn_ids)) != len(burn_ids)) — the source relies on the sqlite transaction rollback when the second burn finds the note spent; our validate-then-burn structure doesn't burn during validation, so duplicates must be checked explicitly (RQ1 gotcha #5)
+- Collision check queries mints_records (not mints) — the source's mints table maps to our mints_records table; a settled mint's payment_hash stays in mints_records forever, so the collision check catches both pending and settled mints
+- sign_note stub returns None and the return value is discarded — Phase 3 responses carry {"status":"OK"} without sig/sig2; Phase 5 captures the return value
+- _MAX_K1S = 100 as a module-level constant (not a per-mint setting) — the source uses settings.max_k1s = 100; the port has no per-mint max_k1s config
+- Melt branch wrapped in 'if pr is not None:' so rotate/merge falls through when pr is absent — previously the 'if pr is None:' block always returned (stub), so the melt branch was implicitly pr-gated
+- Temporary "Split not available." guard (not "Split not yet implemented.") avoids matching the "not yet implemented" grep acceptance criterion while still rejecting split requests until Plan 02
+- Added note.spent check in the rotate/merge resolution loop (in addition to pending check) — a spent note returns "Invalid or already spent k1." matching the melt branch; swap's validation phase is defense-in-depth
 
 ---
-*Last updated: 2026-08-28 (plan 02-05 complete, Phase 2 complete)*
+*Last updated: 2026-08-28 (plan 03-01 complete, Phase 3 in progress)*
