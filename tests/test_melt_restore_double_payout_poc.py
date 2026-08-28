@@ -22,6 +22,10 @@ Three scenarios are pinned:
    (reality catches up, paid=True), reconcile finalizes (burn).
 2. ``benign_failed`` — pay raises (status="failed"), no HTLC, check returns
    paid=False → the note is RESTORED.
+3. ``failed``       — pay raises (status="failed"), HTLC stays live, check
+   returns paid=None → the note is LEFT PENDING (the most insidious tristate
+   case: a terminal raise that looks like a definitive failure but the
+   payment is actually still in flight).
 """
 
 import pytest
@@ -110,3 +114,39 @@ async def test_melt_restore_double_payout_benign_failed_restores(hodl_node, db_s
     note = await get_note(note_id, mint.id)
     assert note.pending is False, "benign failure must restore the note"
     assert note.spent is False, "the note must not be spent"
+
+
+@pytest.mark.anyio
+async def test_melt_restore_double_payout_failed_with_htlc_leaves_pending(
+    hodl_node, db_setup
+):
+    """A terminal FAILED raise with a live HTLC → paid=None → leave pending.
+
+    The most insidious tristate case: ``pay_invoice`` raises with
+    ``status="failed"`` (looks like a definitive failure), but the HTLC
+    stays live (``pending_hodl`` non-empty), so
+    ``check_transaction_status`` returns ``paid=None`` (can't confirm
+    either way). A naive ``except PaymentError: restore`` would restore
+    the note and enable a double-spend. ``_confirm_payment`` must leave
+    the note pending.
+    """
+    k1, note_id, mint = await mint_note(hodl_node, VALUE)
+    hodl_node.pay_mode = "failed"
+
+    pr = fake_invoice(VALUE, "dd" * 32)
+    decoded = bolt11.decode(pr)
+    await _start_melt(note_id, pr, decoded, mint)
+
+    # pay_invoice raises (status="failed"); the HTLC stays live, so
+    # check_transaction_status returns paid=None (PaymentPendingStatus)
+    # while pending_hodl is non-empty.
+    await _melt_pay([note_id], pr, decoded, mint)
+
+    # CRITICAL: the note is still pending — a terminal raise with a live
+    # HTLC must NOT restore (would enable a double-spend).
+    note = await get_note(note_id, mint.id)
+    assert note.pending is True, "failed with live HTLC must leave pending"
+    assert note.spent is False, "the note must not be spent"
+
+    # The in-flight registry is cleared in _melt_pay's finally block.
+    assert not await _melt_in_flight(decoded.payment_hash)
