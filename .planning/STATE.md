@@ -2,21 +2,21 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 2 — Mint + Melt Vertical MVP
-status: Phase 2 complete
-last_updated: "2026-08-28T21:22:00.000Z"
+current_phase: 3 — Rotate + Split + Merge + Sunset
+status: Ready to plan
+last_updated: "2026-08-28T21:36:51.255Z"
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 8
   completed_plans: 8
-  percent: 38
+  percent: 29
 ---
 
 # State: lnurlmint
 
 **Project:** lnurlmint — LNbits extension implementing LUD-25 lnurlcash (Lightning bearer assets), ported from standalone `lnurl-mint` FastAPI app
-**Current Phase:** 2 — Mint + Melt Vertical MVP
+**Current Phase:** 3 — Rotate + Split + Merge + Sunset
 **Project Reference:** `.planning/ROADMAP.md`
 **Mode:** mvp
 **Started:** 2026-08-28

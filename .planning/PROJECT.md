@@ -21,24 +21,24 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 
 - ✓ LNbits extension scaffold (`lnurlmint` package, `__init__.py` with `lnurlmint_ext` router + start/stop lifecycle, `manifest.json`, `config.json`, static files registration) — Phase 1
 - ✓ Per-wallet mint model: each LNbits wallet can create and own a mint instance with its own fees, limits, and identity — Phase 1
-- ✓ Note store backed by LNbits `Database` abstraction (SQLite + Postgres) replacing `lnurl-mint`'s standalone sqlite + module-level lock — Phase 1 (schema only; state machine in Phase 2)
+- ✓ Note store backed by LNbits `Database` abstraction (SQLite + Postgres) replacing `lnurl-mint`'s standalone sqlite + module-level lock — Phase 1 (schema) + Phase 2 (state machine)
 - ✓ No-new-dependencies discipline (LNbits extension docs forbid adding deps not already in LNbits' `pyproject.toml`) — Phase 1
+- ✓ Mint funding via the LNbits wallet abstraction (`create_invoice` / `pay_invoice` from `lnbits.core.services.payments`) — Phase 2
+- ✓ LUD-06 payRequest + callback (`/p/cb`): minting a bearer note by paying an invoice whose preimage becomes the note — Phase 2
+- ✓ LUD-03 withdrawRequest (`/w`) and the mutating melt callback (`/w/cb`): melt with confirm-before-burn tristate settlement — Phase 2 (rotate/split/merge in Phase 3)
+- ✓ Mint fees (`BASE_FEE_MSAT` / `FEE_PERCENT_PPM`), `MIN_MINT_MSAT` net-of-fee floor, fee-aware `minSendable`/`maxSendable` advertisement — Phase 2
+- ✓ Background melt reconciliation task wired into LNbits' `create_permanent_unique_task` lifecycle (replaces `server.py` lifespan + monitor) — Phase 2
+- ✓ Raw LNURL/QR payRequest + callback (mint serves its own `/lnurlmint/lnurlp/{mint_id}` and `/lnurlmint/p/cb/{mint_id}` — no `.well-known` route, no Lightning Address for v1) — Phase 2
+- ✓ Full test suite ported from `lnurl-mint` (5 critical PoCs: double-spend, race, preimage leak, fee conservation, reconcile-inflight) adapted to LNbits test fixtures and wallet mocks — Phase 2 (5 critical PoCs; remaining ~20 tests in Phase 7)
 
 ### Active
 
-- [ ] Mint funding via the LNbits wallet abstraction (`create_invoice` / `pay_invoice` from `lnbits.core.services.payments`) — replaces `lnurl-mint`'s direct lnd/cln REST client (`node.py`)
-- [ ] LUD-06 payRequest + callback (`/p/cb`): minting a bearer note by paying an invoice whose preimage becomes the note
-- [ ] LUD-03 withdrawRequest (`/w`) and the mutating callback (`/w/cb`): melt, rotate, split, merge with `h`/`h2` preimage-hash semantics
 - [ ] LUD-21 verify (`/verify/{payment_hash}`) with the same `VERIFY_ENABLED` off-switch and comment-protection gating as `lnurl-mint`
 - [ ] LUD-25 comment protection (note keyed by WALLET-supplied `comment` hash, not the payment preimage)
 - [ ] Offline verification (`mintPubkey`, `sig`/`sig2` on rotate/split/merge) — per-mint secp256k1 keypair stored in DB (Option B: portable across all LNbits backends; `mintPubkey` is the mint's own key, not the node's)
-- [ ] Mint fees (`BASE_FEE_MSAT` / `FEE_PERCENT_PPM`), `MIN_MINT_MSAT` net-of-fee floor, fee-aware `minSendable`/`maxSendable` advertisement
 - [ ] Sunset mode (`SUNSET_MINT`) — reject mint and split, allow rotate/merge/melt
-- [ ] Background melt reconciliation task wired into LNbits' `create_permanent_unique_task` lifecycle (replaces `server.py` lifespan + monitor)
-- [ ] Raw LNURL/QR payRequest + callback (mint serves its own `/lnurlmint/lnurlp/{mint_id}` and `/lnurlmint/p/cb/{mint_id}` — no `.well-known` route, no Lightning Address for v1)
 - [ ] Public one-pager frontend (mint QR, lightning address, mint limits, node info) ported from `lnurl-mint`'s `frontend.py`
 - [ ] Management SPA: wallet owner can create/configure their mint (fees, limits, sunset, verify toggle), view outstanding notes, see mint activity
-- [ ] Full test suite ported from `lnurl-mint` (~25 tests incl. security PoCs: double-spend, race, preimage leak, fee conservation, reconcile-inflight) adapted to LNbits test fixtures and wallet mocks
 - [ ] Tor / `ONION_URL` base-URL substitution for callback URLs (preserve `public_base_url` semantics)
 
 ### Out of Scope
@@ -102,11 +102,11 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Extension name `lnurlmint` (not `lnurlcash`) | `lnurlcash` is the LUD-25 protocol name; reserving it for the broader ecosystem leaves `lnurlmint` as the clear mint/issuer implementation, matching the existing `lnurl-mint` repo | ✓ Phase 1 — shipped |
-| LNbits wallet as funding source (native) | LNbits already abstracts Lightning per-wallet; idiomatic fit, drops `node.py`'s lnd/cln REST client | — Pending (Phase 2) |
+| LNbits wallet as funding source (native) | LNbits already abstracts Lightning per-wallet; idiomatic fit, drops `node.py`'s lnd/cln REST client | ✓ Phase 2 — create_invoice/pay_invoice/check_transaction_status used |
 | Per-wallet mints | Fits LNbits' multi-tenant model; each user owns their mint instance, fees, limits, notes | ✓ Phase 1 — shipped |
 | Integrate with LNbits `lnurlp` for Lightning Address | Avoids `.well-known` route conflicts with LNbits' built-in lnurlp extension; reuses existing address resolution | ⚠️ Revisit — research found lnurlp needs structural changes (withdrawLink field + delegation hook); deferred to v2, v1 ships raw LNURL/QR |
 | Full feature parity with `lnurl-mint` for v1 | Mint/melt/rotate/split/merge + verify + offline signing + fees + sunset + comment protection + Tor — all of it | — In progress |
-| Port full test suite (security PoCs included) | The PoCs encode real funds-loss guarantees; a line-by-line-behavior port adapted to LNbits fixtures is non-negotiable | — Pending (Phase 2 + 7) |
+| Port full test suite (security PoCs included) | The PoCs encode real funds-loss guarantees; a line-by-line-behavior port adapted to LNbits fixtures is non-negotiable | — In progress (5 critical PoCs passing in Phase 2, remaining ~20 tests in Phase 7) |
 | Management SPA + public one-pager | Per-wallet mints require a UI to create/configure; the public one-pager is the note-holder's face of the mint | — In progress (Phase 1 placeholder, Phase 6 full) |
 | `lnurl-wallet` stays separate for v1 | It is a mint-agnostic static SPA in a different framework (SolidJS); bundling it doubles frontend scope and conflates issuer/holder trust domains | — Pending |
 | Per-mint keypair for offline verification (Option B) | LNbits' `Wallet` abstraction doesn't expose `signmessage`; a per-mint secp256k1 keypair is portable across all backends (FakeWallet, VoidWallet). Tradeoff: `mintPubkey` is the mint's key, not the node's — holders can't cross-verify against the Lightning node pubkey | ✓ Phase 1 — mint_privkey stored, never exposed in API responses |
@@ -115,6 +115,10 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 | DB transaction atomicity via `async with db.connect()` | LNbits `Database` methods open separate transactions; multi-statement ops (e.g., delete_mint check-and-delete) need explicit connection blocks | ✓ Phase 1 — delete_mint uses atomic transaction |
 | `MintResponse` excludes `mint_privkey` from API | Code review C-01: mint signing key must never leave the server after creation. Dedicated response model omits it from all 4 endpoints | ✓ Phase 1 — code review fix applied |
 | `_UPDATABLE_FIELDS` whitelist in update_mint | Code review W-01: prevent SQL column-name injection by whitelisting updatable columns at the CRUD layer | ✓ Phase 1 — code review fix applied |
+| Tristate settlement (paid=True/False/None) | Confirm-before-burn: never restore on `pay_invoice` exception without `_confirm_payment`. `paid=None` leaves pending for reconcile. Uses `status.success`/`status.failed`/`status.paid is None` (NOT `status.pending`) | ✓ Phase 2 — 5 PoC tests passing |
+| In-flight melt tracking (asyncio.Lock refcount) | Prevents reconcile from restoring notes whose `pay_invoice` RPC hasn't landed yet. Module-level dict, register after mark_pending, clear in finally | ✓ Phase 2 — TEST-04 passing |
+| Background reconcile (60s + boot one-shot) | Resolves stranded notes from crashed processes. Skips in-flight, logs+leaves pending for unconfirmable. `create_permanent_unique_task` + `run_interval` | ✓ Phase 2 — wired in lnurlmint_start/stop |
+| Fee math (round up to sat, melt fee limit) | `_mint_fee_msat` rounds UP, `_melt_fee_limit_msat` = max(0.5%, 5000, mint_fee). Protocol contract, not implementation detail | ✓ Phase 2 — verified in services.py |
 
 ## Evolution
 
@@ -134,4 +138,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-28 after Phase 1 (extension scaffold + data model + per-wallet mint CRUD shipped; code review fixes applied)*
+*Last updated: 2026-08-28 after Phase 2 (mint + melt vertical MVP shipped; tristate settlement, in-flight tracking, background reconcile, 5 PoC tests passing)*
