@@ -17,13 +17,30 @@ from hashlib import sha256
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Request
+import bolt11
+from fastapi import APIRouter, BackgroundTasks, Query, Request
 from loguru import logger
 
 from lnbits.core.services.payments import create_invoice as lnbits_create_invoice
 
-from .crud import get_mint_by_id, get_note, record_mint_record
-from .services import _mint_fee_msat, _min_sendable_msat, _public_base_url, _try_settle_mint
+from .crud import (
+    PendingNoteError,
+    get_mint_by_id,
+    get_note,
+    mark_pending,
+    melt_record_exists,
+    mint_record_exists,
+    record_melt,
+    record_mint_record,
+)
+from .services import (
+    _melt_pay,
+    _mint_fee_msat,
+    _min_sendable_msat,
+    _public_base_url,
+    _track_melt_start,
+    _try_settle_mint,
+)
 
 lnurlmint_lnurl_router = APIRouter()
 
@@ -185,3 +202,124 @@ async def get_withdraw(
         "maxWithdrawable": note.amount_msat,
         "defaultDescription": f"lnurlcash bearer note on {mint.username}",
     }
+
+
+@lnurlmint_lnurl_router.get("/w/cb/{mint_id}")
+async def get_withdraw_callback(
+    mint_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    k1: list[str] = Query(...),
+    pr: Optional[str] = None,
+    amount: Optional[int] = None,
+    h: Optional[str] = None,
+    h2: Optional[str] = None,
+) -> dict:
+    """LUD-03 withdraw callback — melt a bearer note back to sats.
+
+    Public endpoint (no auth). Validates the invoice (pr), rejects
+    duplicate/self-mint payment hashes (SEC-06), atomically reserves
+    the note via mark_pending, registers the melt as in-flight
+    (_track_melt_start, SEC-03), records the melt invoice, replies
+    {\"status\":\"OK\"} immediately (LUD-03 compliance), and schedules
+    the background _melt_pay task (Plan 04 implements tristate
+    settlement). pr MUST NOT combine with multiple k1s or amount
+    (REDEEM-06); h is required when pr is absent (Phase 3 implements
+    rotate/split/merge — Phase 2 returns a not-yet-implemented error).
+
+    No logger call includes k1, pr, h, h2, request.url, or any query
+    string (SEC-05). Use mint_id, note_id, and payment_hash (all
+    hashes, not secrets) if logging is needed.
+    """
+    mint = await get_mint_by_id(mint_id)
+    if mint is None:
+        return {"status": "ERROR", "reason": "Unknown mint."}
+
+    # REDEEM-06: pr MUST NOT combine with multiple k1s or amount.
+    if pr is not None and (len(k1) > 1 or amount is not None):
+        return {
+            "status": "ERROR",
+            "reason": "pr cannot be combined with multiple k1s or amount - merge or split first.",
+        }
+
+    # h required when pr is absent (REDEEM-06). Phase 3 implements
+    # rotate/split/merge; Phase 2 returns a not-yet-implemented error.
+    if pr is None:
+        if h is None or not HEX32_PATTERN.match(h):
+            return {"status": "ERROR", "reason": "missing h"}
+        return {
+            "status": "ERROR",
+            "reason": "Rotate/split/merge not yet implemented.",
+        }
+
+    # --- Melt branch (pr is not None, single k1) ---
+    note_k1 = k1[0]
+    if not HEX32_PATTERN.match(note_k1):
+        return {"status": "ERROR", "reason": "Invalid or already spent k1."}
+
+    note_id = sha256(bytes.fromhex(note_k1)).hexdigest()
+
+    note = await get_note(note_id, mint_id)
+    if note is None:
+        settled = await _try_settle_mint(note_id, mint)
+        if settled:
+            note = await get_note(note_id, mint_id)
+    if note is None:
+        return {"status": "ERROR", "reason": "Invalid or already spent k1."}
+    if note.pending:
+        return {"status": "ERROR", "reason": "pending"}
+
+    total_msat = note.amount_msat
+
+    try:
+        decoded = bolt11.decode(pr)
+    except Exception as exc:
+        return {"status": "ERROR", "reason": f"Invalid invoice: {exc!s}"}
+
+    if decoded.amount_msat != total_msat:
+        return {
+            "status": "ERROR",
+            "reason": f"Invoice must be for exactly {total_msat} msat.",
+        }
+
+    # Self-mint rejection (SEC-06): reject if the pr's payment_hash
+    # exists in mints_records — the mint must not melt into an invoice
+    # it issued itself.
+    if decoded.has_payment_hash and await mint_record_exists(decoded.payment_hash):
+        return {
+            "status": "ERROR",
+            "reason": "Cannot melt into an invoice this mint issued itself.",
+        }
+
+    # Duplicate-melt rejection (SEC-06): reject if the pr's
+    # payment_hash was already used by an earlier melt.
+    if decoded.has_payment_hash and await melt_record_exists(decoded.payment_hash):
+        return {
+            "status": "ERROR",
+            "reason": "Invoice already used by an earlier melt - use a fresh one.",
+        }
+
+    # Atomically reserve the note (all-or-nothing, mint_id-scoped).
+    try:
+        await mark_pending([note_id], decoded.payment_hash, mint_id)
+    except PendingNoteError:
+        return {"status": "ERROR", "reason": "pending"}
+    except ValueError as exc:
+        return {"status": "ERROR", "reason": str(exc)}
+
+    # Register in-flight AFTER mark_pending succeeds, BEFORE the
+    # background task (SEC-03 — prevents the reconcile race).
+    if decoded.has_payment_hash:
+        await _track_melt_start(decoded.payment_hash)
+
+    # Record the melt invoice for verify and duplicate-melt detection.
+    if decoded.has_payment_hash:
+        await record_melt(
+            decoded.payment_hash, pr, mint.id, note_id, total_msat
+        )
+
+    # Schedule the background tristate settlement (Plan 04 implements).
+    background_tasks.add_task(_melt_pay, [note_id], pr, decoded, mint)
+
+    logger.debug(f"lnurlmint: scheduled melt for mint_id={mint_id}")
+    return {"status": "OK"}
