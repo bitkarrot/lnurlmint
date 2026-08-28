@@ -46,7 +46,7 @@ Phase 1 (Foundation)
 **Plans:**
 1. **Extension scaffold + walking skeleton** ✅ — `__init__.py` (`lnurlmint_ext` APIRouter, `lnurlmint_start`/`lnurlmint_stop` stubs, `lnurlmint_static_files`, `db`), `manifest.json`, `config.json`, static files registration at `/lnurlmint/static`. m001_initial migration (mints table, 15 columns), Mint/CreateMint pydantic v1 models, mint CRUD, POST/GET management API, placeholder Vue page. E2E verified. *(Plan 01-01 complete — 2026-08-28)*
 2. **Data model + migrations** ✅ — `migrations.py` (`m001_initial`: `mints`, `notes`, `mints_records`, `melts` tables, all wallet-scoped via `mints.wallet` FK), `models.py` (pydantic v1 `Mint`, `Note`, `MintRecord`, `MeltRecord` + LNURL wire models). Establish the `async with db.connect() as conn:` transaction discipline in CRUD stubs. *(Plan 01-02 complete — 2026-08-28)*
-3. **Per-wallet mint CRUD + management API** — `crud.py` (mint row CRUD, all queries scoped by `wallet_id`), `views_api.py` (create/configure/list/delete mint via `require_admin_key`/`require_invoice_key` decorators). Cross-wallet isolation enforced at query layer.
+3. **Per-wallet mint CRUD + management API** ✅ — `crud.py` (get_mint, update_mint, count_outstanding_notes, delete_mint — all wallet-scoped), `views_api.py` (GET/PUT/DELETE /{mint_id} via `require_admin_key`/`require_invoice_key`), UpdateMint partial-update model, outstanding-notes delete guard (409) with atomic check-and-delete, Vue create-mint form + delete button. Cross-wallet isolation E2E-verified. *(Plan 01-03 complete — 2026-08-28)*
 
 **Success Criteria:**
 1. LNbits loads the lnurlmint extension without errors; it appears in the extensions list with valid metadata.

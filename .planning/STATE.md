@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-status: in_progress
-last_updated: "2026-08-28T18:42:00.000Z"
+status: complete
+last_updated: "2026-08-28T19:07:00.000Z"
 progress:
   total_phases: 7
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # State: lnurlmint
@@ -25,7 +25,7 @@ progress:
 
 | Phase | Name | Status | Plans Completed |
 |-------|------|--------|----------------|
-| 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | in_progress | 2/3 |
+| 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
 | 2 | Mint + Melt Vertical MVP | pending | 0/5 |
 | 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Phase 1: Extension scaffold + data model + per-wallet mint CRUD. Plans 01-01 (walking skeleton: extension loads, m001 mints table, POST/GET management API, placeholder Vue page) and 01-02 (m002 notes/mints_records/melts tables + Note/MintRecord/MeltRecord pydantic v1 models) complete. The full data model (all four tables) is in place. Plan 01-03 (full mint CRUD: get/update/delete + cross-wallet isolation tests) remains to complete Phase 1.
+Phase 1 complete: the full per-wallet mint CRUD vertical slice is delivered — extension scaffold, complete data model (all four tables), POST/GET/GET/{id}/PUT/{id}/DELETE/{id} management API with cross-wallet isolation E2E-verified, outstanding-notes delete guard (409), and Vue placeholder with create/delete interactivity. Phase 2 (Mint + Melt Vertical MVP) is next — the highest-risk phase (confirm-before-burn state machine, in-flight melt tracking, background reconciliation, 5 critical PoC tests).
 
 ## Key Decisions Locked
 
@@ -58,6 +58,13 @@ Phase 1: Extension scaffold + data model + per-wallet mint CRUD. Plans 01-01 (wa
 - `created_at` pre-validator added to Note/MintRecord/MeltRecord (shared `_parse_created_at` helper) to accept date-only strings as UTC — mirrors giftcards' `parse_expires_at` pattern; Mint/CreateMint unchanged
 - mints_records.minted is the compare-and-set flag (UPDATE ... WHERE minted=0 + rowcount==1) for race-safe lazy settlement; notes.pending_payment_hash links stranded notes to their melt invoices for reconcile
 
+### Plan 01-03 Decisions
+- DELETE endpoint pre-checks get_mint before delete_mint — without this, a cross-wallet DELETE returns 200 (delete_mint finds 0 outstanding notes via the wallet-scoped JOIN and deletes 0 rows, returning True); the get_mint check enforces the 404
+- count_outstanding_notes uses JOIN lnurlmint.notes n JOIN lnurlmint.mints m ON n.mint_id = m.id WHERE m.wallet = :wallet — the notes table has no wallet column, so wallet scoping is enforced via the JOIN on mints
+- UpdateMint root_validator only checks sendable bounds when both min_sendable_msat and max_sendable_msat are explicitly provided (partial update may set only one)
+- Vue uses LNbits.api.request('POST'/'DELETE', url, adminkey, data) — same deviation as Plan 01-01: LNbits JS API has no .post/.delete helpers, only request(method, url, key, data)
+- delete_mint uses `async with db.connect() as conn:` for atomic check-and-delete (outstanding-notes count + delete in one transaction) — the LNbits Database abstraction otherwise opens a separate transaction per call
+
 ## Notes
 
 - REQUIREMENTS.md stated 52 requirements; actual count is 63. Traceability updated with correct count.
@@ -65,6 +72,7 @@ Phase 1: Extension scaffold + data model + per-wallet mint CRUD. Plans 01-01 (wa
 - Phase 3 and Phase 4 can run in parallel (both depend on Phase 2, neither depends on the other).
 - Plan 01-01 complete: walking skeleton verified E2E (extension loads, migration runs, POST/GET work, cross-wallet isolation holds).
 - Plan 01-02 complete: full data model in place — m002 migration creates notes/mints_records/melts tables; Note/MintRecord/MeltRecord pydantic v1 models; store-hashes-not-secrets invariant enforced (no preimage column); compare-and-set + reconcile columns ready for Phase 2.
+- Plan 01-03 complete: full per-wallet mint CRUD (get/update/delete) with cross-wallet isolation E2E-verified on all endpoints, outstanding-notes delete guard (409) with atomic check-and-delete, UpdateMint partial-update model, Vue create-mint form + delete button. Phase 1 complete.
 
 ---
-*Last updated: 2026-08-28 (plan 01-02 complete)*
+*Last updated: 2026-08-28 (plan 01-03 complete, Phase 1 complete)*
