@@ -238,12 +238,14 @@ async def get_withdraw_callback(
       all k1 → note_ids + values (with lazy settlement), burns all and
       mints one note keyed by h worth sum + (n-1)*base_fee refund via
       swap. Rotate is merge with n=1 (refund=0, value-neutral).
-    - **Split** (pr absent, amount present): Plan 02 adds this branch
-      with h2 validation and two-note mint arithmetic.
+    - **Split** (pr absent, amount present, h + h2 present): resolves
+      all k1 → note_ids + values, burns all and mints two notes —
+      `amount` keyed by `h`, `change = total - amount - base_fee` keyed
+      by `h2`. Rejects zero-value change and negative change after fee.
 
     pr MUST NOT combine with multiple k1s or amount (REDEEM-06); h is
     required when pr is absent; h2 additionally required when amount is
-    present (Plan 02). Requests with more than _MAX_K1S k1s are rejected.
+    present. Requests with more than _MAX_K1S k1s are rejected.
 
     No logger call includes k1, pr, h, h2, request.url, or any query
     string (SEC-05). Use mint_id, note_id, and payment_hash (all
@@ -268,11 +270,13 @@ async def get_withdraw_callback(
             "reason": f"Too many k1s (max {_MAX_K1S}).",
         }
 
-    # h required when pr is absent (REDEEM-06). h2 validation for split
-    # is added in Plan 02.
+    # h required when pr is absent (REDEEM-06). h2 required when amount
+    # is present (split — REDEEM-06).
     if pr is None:
         if h is None or not HEX32_PATTERN.match(h):
             return {"status": "ERROR", "reason": "missing h"}
+        if amount is not None and (h2 is None or not HEX32_PATTERN.match(h2)):
+            return {"status": "ERROR", "reason": "missing h2"}
 
     # --- Melt branch (pr is not None, single k1) ---
     if pr is not None:
@@ -360,18 +364,10 @@ async def get_withdraw_callback(
         logger.debug(f"lnurlmint: scheduled melt for mint_id={mint_id}")
         return {"status": "OK"}
 
-    # --- Split branch (pr is None, amount is not None) ---
-    # Plan 02 adds the full split branch with h2 validation and
-    # two-note mint arithmetic. For now, reject split requests.
-    if amount is not None:
-        return {"status": "ERROR", "reason": "Split not available."}
-
-    # --- Rotate/merge branch (pr is None, h is present, amount is None) ---
+    # --- Shared k1 resolution (split + rotate/merge) ---
     # Resolve all k1 → note_ids + values (with lazy settlement via
-    # _try_settle_mint). Rotate is merge with n=1 (refund=0, value-
-    # neutral). Merge refunds (n-1)*base_fee_msat — every base fee
-    # collected beyond the single one this now-one note should have
-    # cost. Both return {"status":"OK"} (sig deferred to Phase 5).
+    # _try_settle_mint). Both split and rotate/merge burn the same set
+    # of input notes, so the resolution loop is shared.
     note_ids: list[str] = []
     values: list[int] = []
     for note_k1 in k1:
@@ -393,6 +389,42 @@ async def get_withdraw_callback(
         values.append(note.amount_msat)
 
     total_msat = sum(values)
+
+    # --- Split branch (pr is None, amount is not None) ---
+    # Burns all input notes and mints two: `amount` keyed by `h`,
+    # `change = total - amount - base_fee` keyed by `h2`. The base_fee
+    # is taken from the change side (not the amount) so a holder can't
+    # dodge the fee by splitting into dust. Rejects zero-value change
+    # (change < 1) and negative change after fee (change_before_fee <
+    # base_fee). Returns {"status":"OK"} (sig/sig2 deferred to Phase 5).
+    if amount is not None:
+        if not 0 < amount < total_msat:
+            return {
+                "status": "ERROR",
+                "reason": f"amount must be between 0 and {total_msat} msat.",
+            }
+        change_before_fee = total_msat - amount
+        if change_before_fee < mint.base_fee_msat:
+            return {"status": "ERROR", "reason": "insufficient value"}
+        change_amount = change_before_fee - mint.base_fee_msat
+        if change_amount < 1:
+            return {"status": "ERROR", "reason": "insufficient value"}
+        try:
+            await swap(note_ids, [h, h2], [amount, change_amount], mint_id)
+        except PendingNoteError:
+            return {"status": "ERROR", "reason": "pending"}
+        except ValueError as exc:
+            return {"status": "ERROR", "reason": str(exc)}
+        await sign_note(h, amount, mint)
+        await sign_note(h2, change_amount, mint)
+        logger.debug(f"lnurlmint: split for mint_id={mint_id}")
+        return {"status": "OK"}
+
+    # --- Rotate/merge branch (pr is None, h is present, amount is None) ---
+    # Rotate is merge with n=1 (refund=0, value-neutral). Merge refunds
+    # (n-1)*base_fee_msat — every base fee collected beyond the single
+    # one this now-one note should have cost. Returns {"status":"OK"}
+    # (sig deferred to Phase 5).
     refund = (len(note_ids) - 1) * mint.base_fee_msat
     merged_amount = total_msat + refund
 
