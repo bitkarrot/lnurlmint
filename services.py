@@ -8,15 +8,28 @@ function here logs a spendable credential or full request URL (SEC-05).
 """
 
 import asyncio
+from typing import Optional
 
 from loguru import logger
 
+from lnbits.core.models.payments import PaymentState
 from lnbits.core.services.payments import (
     check_transaction_status,
     create_invoice as lnbits_create_invoice,
+    pay_invoice as lnbits_pay_invoice,
 )
+from lnbits.exceptions import PaymentError
 
-from .crud import get_pending_mint_record, settle_mint
+from .crud import (
+    finalize_melt,
+    get_mint_by_id,
+    get_mint_id_for_note,
+    get_pending_mint_record,
+    mark_melt_settled,
+    pending_melts,
+    restore,
+    settle_mint,
+)
 from .models import Mint
 
 # Retry backoff delays (seconds) for _confirm_payment (Plan 04). Tests
@@ -128,6 +141,59 @@ async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
         net_amount = await settle_mint(note_id)
         return net_amount is not None
     return False
+
+
+# ---------------------------------------------------------------------------
+# Confirm-before-burn settlement (SEC-01, REC-01)
+#
+# _confirm_payment retries check_transaction_status with backoff to
+# distinguish the tristate: paid=True (finalize), paid=False (restore),
+# paid=None (leave pending). CRITICAL: it uses status.success,
+# status.failed, and `status.paid is None` directly — NEVER the
+# `.pending` property, which is `self.paid is not True` and thus True
+# for BOTH paid=None AND paid=False (RQ7 gotcha #1). Using `.pending`
+# would treat a confirmed failure as pending and retry forever.
+# ---------------------------------------------------------------------------
+
+
+async def _confirm_payment(
+    payment_hash: str,
+    wallet_id: str,
+    delays: tuple[int, ...] | None = None,
+) -> Optional[bool]:
+    """Retry check_transaction_status with backoff. Returns True/False/None.
+
+    True  = confirmed paid (finalize). False = confirmed not paid
+    (restore). None = unconfirmable after all retries (leave pending).
+
+    Default delays = _CONFIRMATION_RETRY_DELAYS_SECONDS (1,2,4,8,16 ~31s).
+    delays=() does a single attempt with no sleep — used by reconcile
+    for a single-attempt confirmation.
+    """
+    if delays is None:
+        delays = _CONFIRMATION_RETRY_DELAYS_SECONDS
+    for delay in (0, *delays):
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            status = await check_transaction_status(wallet_id, payment_hash)
+            if status.success:
+                return True
+            if status.failed:
+                return False
+            # status.paid is None → still pending, retry.
+            # CRITICAL: do NOT use the `.pending` property (True for
+            # both None and False) — it would treat confirmed failure
+            # as pending.
+            if status.paid is None:
+                continue
+            # paid is False but status.failed didn't catch — defensive.
+            return False
+        except Exception as exc:
+            logger.warning(
+                f"confirm payment {payment_hash}: attempt failed, retrying: {exc}"
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
