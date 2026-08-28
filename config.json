@@ -1,0 +1,15 @@
+{
+  "name": "lnurlmint",
+  "short_description": "Mint Lightning-funded bearer notes (LUD-25 lnurlcash)",
+  "tile": "/lnurlmint/static/image/lnurlmint.png",
+  "contributors": [
+    {
+      "name": "dni",
+      "uri": "https://github.com/dni",
+      "role": "Lead dev"
+    }
+  ],
+  "version": "0.1.0",
+  "min_lnbits_version": "1.5.4",
+  "license": "MIT"
+}

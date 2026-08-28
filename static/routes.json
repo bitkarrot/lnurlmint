@@ -1,0 +1,8 @@
+[
+  {
+    "path": "/lnurlmint/",
+    "name": "PageLnurlmint",
+    "template": "/lnurlmint/static/js/index.vue",
+    "component": "/lnurlmint/static/js/index.js"
+  }
+]
