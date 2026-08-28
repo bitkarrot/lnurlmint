@@ -339,14 +339,19 @@ async def finalize_melt(note_ids: list[str], mint_id: str) -> None:
     Sets spent=1, pending=0, pending_payment_hash=NULL for each note,
     scoped by mint_id (SEC-07). Called only after positive settlement
     confirmation (paid=True) — never on pending or unconfirmable state.
+
+    All updates run in a single `async with db.connect() as conn:` block
+    for atomicity (W-02) — a failure mid-loop cannot leave some notes
+    burned and others not, which matters for Phase 3 multi-note melts.
     """
-    for note_id in note_ids:
-        await db.execute(
-            "UPDATE lnurlmint.notes "
-            "SET spent = 1, pending = 0, pending_payment_hash = NULL "
-            "WHERE id = :id AND mint_id = :mid",
-            {"id": note_id, "mid": mint_id},
-        )
+    async with db.connect() as conn:
+        for note_id in note_ids:
+            await conn.execute(
+                "UPDATE lnurlmint.notes "
+                "SET spent = 1, pending = 0, pending_payment_hash = NULL "
+                "WHERE id = :id AND mint_id = :mid",
+                {"id": note_id, "mid": mint_id},
+            )
 
 
 async def restore(note_ids: list[str], mint_id: str) -> None:
@@ -356,14 +361,19 @@ async def restore(note_ids: list[str], mint_id: str) -> None:
     mint_id (SEC-07). Called only after positive failure confirmation
     (paid=False) — never on pending or unconfirmable state (TEST-03
     tristate: paid=None leaves the note pending).
+
+    All updates run in a single `async with db.connect() as conn:` block
+    for atomicity (W-02) — a failure mid-loop cannot leave some notes
+    restored and others not, which matters for Phase 3 multi-note melts.
     """
-    for note_id in note_ids:
-        await db.execute(
-            "UPDATE lnurlmint.notes "
-            "SET pending = 0, pending_payment_hash = NULL "
-            "WHERE id = :id AND mint_id = :mid",
-            {"id": note_id, "mid": mint_id},
-        )
+    async with db.connect() as conn:
+        for note_id in note_ids:
+            await conn.execute(
+                "UPDATE lnurlmint.notes "
+                "SET pending = 0, pending_payment_hash = NULL "
+                "WHERE id = :id AND mint_id = :mid",
+                {"id": note_id, "mid": mint_id},
+            )
 
 
 async def pending_melts() -> dict[str, list[str]]:
