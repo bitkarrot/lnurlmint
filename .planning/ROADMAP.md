@@ -29,6 +29,7 @@ Phase 1 (Foundation)
 ```
 
 **Parallelization opportunities:**
+
 - Phase 3 and Phase 4 can run in parallel (both depend on Phase 2, neither depends on the other).
 - Phase 6 (Tor + Frontend) can start in parallel with Phase 3/4/5 once the Phase 2 API contract is stable (frontend builds against the management API from Phase 1 + LNURL endpoints from Phase 2).
 
@@ -44,11 +45,13 @@ Phase 1 (Foundation)
 **Requirements:** EXT-01, EXT-02, EXT-04, DATA-01, DATA-02, DATA-03, DATA-04, DATA-05 (8)
 
 **Plans:**
-1. **Extension scaffold + walking skeleton** ✅ — `__init__.py` (`lnurlmint_ext` APIRouter, `lnurlmint_start`/`lnurlmint_stop` stubs, `lnurlmint_static_files`, `db`), `manifest.json`, `config.json`, static files registration at `/lnurlmint/static`. m001_initial migration (mints table, 15 columns), Mint/CreateMint pydantic v1 models, mint CRUD, POST/GET management API, placeholder Vue page. E2E verified. *(Plan 01-01 complete — 2026-08-28)*
+3/3 plans complete
+
 2. **Data model + migrations** ✅ — `migrations.py` (`m001_initial`: `mints`, `notes`, `mints_records`, `melts` tables, all wallet-scoped via `mints.wallet` FK), `models.py` (pydantic v1 `Mint`, `Note`, `MintRecord`, `MeltRecord` + LNURL wire models). Establish the `async with db.connect() as conn:` transaction discipline in CRUD stubs. *(Plan 01-02 complete — 2026-08-28)*
 3. **Per-wallet mint CRUD + management API** ✅ — `crud.py` (get_mint, update_mint, count_outstanding_notes, delete_mint — all wallet-scoped), `views_api.py` (GET/PUT/DELETE /{mint_id} via `require_admin_key`/`require_invoice_key`), UpdateMint partial-update model, outstanding-notes delete guard (409) with atomic check-and-delete, Vue create-mint form + delete button. Cross-wallet isolation E2E-verified. *(Plan 01-03 complete — 2026-08-28)*
 
 **Success Criteria:**
+
 1. LNbits loads the lnurlmint extension without errors; it appears in the extensions list with valid metadata.
 2. A wallet owner can create a mint via `POST /lnurlmint/api/v1/mints` (setting fees, limits, username, verify toggle, sunset, onion_url) and retrieve it via `GET`.
 3. Database migrations run successfully creating all four tables (`mints`, `notes`, `mints_records`, `melts`) on both SQLite and Postgres.
@@ -66,6 +69,7 @@ Phase 1 (Foundation)
 **Requirements:** EXT-03, MINT-01, MINT-02, MINT-03, MINT-04, MINT-05, REDEEM-01, REDEEM-02, REDEEM-06, SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, SEC-06, SEC-07, REC-01, REC-02, REC-03, ECON-01, ECON-02, ECON-03, ECON-04, TEST-01, TEST-02, TEST-03, TEST-04, TEST-05 (28)
 
 **Plans:**
+
 1. **DB transaction discipline + note CRUD core** — `crud.py` note operations (`settle_mint`, `mark_pending`, `finalize_melt`, `restore`, `pending_melts`) using single `async with db.connect() as conn:` blocks for atomicity. Compare-and-set pattern (`UPDATE ... WHERE minted=0` + `rowcount==1`). Store-hashes-not-secrets: note IDs are `sha256(k1)`, no preimage column. Wallet-scoped note lookups via JOIN on `mints.wallet`.
 2. **Mint flow (LUD-06 payRequest + callback)** — `views_lnurl.py`: `GET /lnurlmint/lnurlp/{mint_id}` (payRequest with fee-aware `minSendable`/`maxSendable`, `withdrawLink`, `disposable: false`), `GET /lnurlmint/p/cb/{mint_id}` (callback: `create_invoice` via LNbits, record pending mint, return `pr`). `services.py`: fee math (`_mint_fee_msat` rounding up, fee-aware bounds), lazy settlement materialization (`settle_mint` on first `/w` or `/verify` poll after settlement).
 3. **Informational /w + melt callback** — `GET /lnurlmint/w/{mint_id}` (LUD-03 withdrawRequest, purely informational, rejects pending/spent/unknown notes), `GET /lnurlmint/w/cb/{mint_id}` (melt: validate `pr`, reject duplicate/self-mint payment hashes, `mark_pending` atomically, reply `{"status":"OK"}` immediately, schedule background `_melt_pay`). Callback validation rules (`pr` MUST NOT combine with multiple `k1`s or `amount`; `h` required when `pr` absent).
@@ -73,6 +77,7 @@ Phase 1 (Foundation)
 5. **Critical PoC tests** — Port and pass against LNbits fixtures: `test_poc_double_melt.py` (TEST-01), `test_poc_a2_settle_race.py` (TEST-02), `test_melt_restore_double_payout_poc.py` (TEST-03 — tristate), `test_poc_reconcile_inflight_race.py` (TEST-04), `test_poc_f2_pending_info_leak.py` (TEST-05). Use fake backend returning `paid=None` to exercise tristate.
 
 **Success Criteria:**
+
 1. A user can mint a bearer note by paying an invoice via the LUD-06 payRequest flow; the note materializes lazily on settlement, credited with `amount - mint_fee` net of the advertised fee.
 2. A user can melt a bearer note back to sats via the LUD-03 withdraw callback; the note is burned only on positive settlement confirmation (`paid=True`), restored only on positive failure (`paid=False`), and left pending if unconfirmable (`paid=None`).
 3. A note melted twice is rejected (pending state prevents second melt); a pending note is never advertised as withdrawable by the informational `/w` endpoint.
@@ -91,11 +96,13 @@ Phase 1 (Foundation)
 **Requirements:** REDEEM-03, REDEEM-04, REDEEM-05, REDEEM-07, ECON-05, TEST-06, TEST-08 (7)
 
 **Plans:**
+
 1. **Rotate + merge** — `views_lnurl.py` callback: rotate (single `k1` + `h`, no `pr`/`amount` → burn old, mint new same value), merge (many `k1` + `h` → burn all, mint one worth sum + `(n-1)*base_fee` refund). `crud.swap` atomic burn+mint in one `db.connect()` block. `h2` required when `amount` present; `h` required when `pr` absent.
 2. **Split** — callback: split (one/many `k1` + `amount` + `h` + `h2` → burn all, mint two notes: `amount` keyed by `h`, remainder keyed by `h2`). Fee arithmetic: `change = total - amount - base_fee_msat`; reject `change < 1` (zero-value note). Callback response carries no secret (just `{"status":"OK"}` + optional `sig`/`sig2`).
 3. **Sunset mode + collision griefing + fee conservation PoCs** — Sunset: `/p/cb` and split branch reject with `{"status":"ERROR","reason":"This mint is sunsetting - ..."}`; rotate/merge/melt unaffected. Port `test_poc_fee_conservation.py` + `test_poc_fee_loop.py` (TEST-06: fee rounding up, fee-aware bounds, conservation identity, no inflation). Port `test_poc_a1_collision_griefing.py` (TEST-08: `swap` collision-checks both `notes` and `mints_records`).
 
 **Success Criteria:**
+
 1. A note holder can rotate a note (burn old, mint new with same value) and merge multiple notes into one (sum + fee refund).
 2. A note holder can split a note into two notes with correct fee arithmetic (no zero-value notes, no inflation).
 3. Sunset mode rejects new mints and splits while allowing rotate, merge, and melt.
@@ -113,11 +120,13 @@ Phase 1 (Foundation)
 **Requirements:** COMM-01, COMM-02, COMM-03, VER-01, VER-02, VER-03, VER-04, TEST-07 (8)
 
 **Plans:**
+
 1. **Comment protection** — `GET /lnurlmint/p/cb/{mint_id}` accepts `comment` query param (LUD-12); if bare hex-encoded 32-byte hash, note credited as `k1=<secret>` keyed by comment hash (not payment preimage). Non-hex32 or no `comment` falls back to plain preimage-keyed note (never rejected). `verify` URL advertised in `/p/cb` response only when `comment` was used.
 2. **Verify endpoint (LUD-21)** — `GET /lnurlmint/verify/{mint_id}/{payment_hash}`: if `!verify_enabled` → 404 (real off-switch). If mint payment_hash found and `!comment_protected` → 404 (preimage IS the secret). If comment-protected → serve `settled`, live-fetched `preimage`, `pr`. If melt payment_hash found → serve unconditionally (melt preimage is harmless). Preimage fetched live from funding source on every call, never cached.
 3. **Verify race PoC** — Port `test_poc_verify_race.py` (TEST-07): verify refuses preimage for no-comment mints, serves it for comment-protected mints, `VERIFY_ENABLED=false` = 404. Port `test_surface_hunter_verification.py` if in scope.
 
 **Success Criteria:**
+
 1. A mint using comment protection keys the note by the WALLET-supplied comment hash, not the payment preimage — closing the routing-node preimage race.
 2. The LUD-21 verify endpoint reports settlement status with live-fetched preimage for comment-protected mints; `VERIFY_ENABLED=false` produces a real 404.
 3. Verify refuses to serve preimages for no-comment mints (where the preimage is the bearer secret) and serves them for comment-protected mints and melt directions.
@@ -135,10 +144,12 @@ Phase 1 (Foundation)
 **Requirements:** SIGN-01, SIGN-02, SIGN-03, SIGN-04 (4)
 
 **Plans:**
+
 1. **Per-mint keypair + mintPubkey advertisement** — `signing.py`: secp256k1 keypair generated at mint creation, stored in `mints.mint_privkey`. `GET /lnurlmint/w/{mint_id}` advertises `mintPubkey` (the mint's own public key) when keypair exists. `verify_note` (coincurve `PublicKey.from_signature_and_message`) for test-only use.
 2. **sign_note + sig/sig2 on rotate/split/merge** — Recoverable ECDSA signature over `LNURLcash:<amount>:<note_id_hex>` using mint's private key. Rotate/split/merge responses carry `sig`/`sig2`. Signing failures swallowed (return `None`, never raise). Port `test_offline_verification.py` against LNbits fixtures.
 
 **Success Criteria:**
+
 1. Each mint has a secp256k1 keypair; the public key is advertised as `mintPubkey` in the withdrawRequest response.
 2. Rotate/split/merge responses carry `sig`/`sig2` signatures verifiable offline against `mintPubkey` using `verify_note`.
 3. Signing failures are swallowed — a signing error never blocks a rotate/split/merge operation.
@@ -155,11 +166,13 @@ Phase 1 (Foundation)
 **Requirements:** TOR-01, TOR-02, UI-01, UI-02, UI-03, UI-04 (6)
 
 **Plans:**
+
 1. **Tor base URL substitution** — Per-mint `onion_url` field: when request Host matches onion hostname, callback URLs use `onion_url` as base. `public_base_url` derivation is Host-header-spoof-proof (built from per-mint `base_url`, not `req.url_for`). `X-Forwarded-Host` only behind trusted proxy (documented assumption).
 2. **Management SPA** — Vue 3 + Quasar: wallet owner can create a new mint (fees, limits, username, verify toggle, sunset, onion_url), update config, delete mint (only if no outstanding notes), view outstanding notes, see mint activity. Served via `index` generic view (`check_user_exists` + `require_admin_key`/`require_invoice_key`).
 3. **Public one-pager** — Vue 3 + Quasar: mint QR code (LNURL of payRequest via `pyqrcode`), mint limits, node info (alias, color, capacity, channel/peer counts) with mempool.space/amboss.space links, Tor address if configured. Served via `index_public` (no authentication).
 
 **Success Criteria:**
+
 1. A Tor visitor's callback URLs use the mint's `onion_url` as the base — no clearnet `base_url` leaks into a Tor visitor's QR code.
 2. A wallet owner can create, configure, and delete their mint via the management SPA; can view outstanding notes and mint activity.
 3. A visitor can view the public one-pager showing the mint QR, limits, and node info without authentication.
@@ -176,10 +189,12 @@ Phase 1 (Foundation)
 **Requirements:** TEST-09, TEST-10 (2)
 
 **Plans:**
+
 1. **Bearer threat suite** — Port `test_bearer_threat_suite_poc.py` (TEST-09): the full bearer-asset threat suite passes against LNbits fixtures. This is the integration-level security gate combining all individual PoC guarantees.
 2. **Remaining tests** — Port all remaining tests (TEST-10): `test_lnurlcash.py`, `test_config.py`, `test_errors.py`, `test_frontend.py`, `test_mint_log.py`, `test_node.py`, `test_reconcile.py`, `test_verify.py`, `test_offline_verification.py`, `test_onion.py`, `test_comment_protection.py`, `test_surface_hunter_verification.py`, `test_auth_data_hunter_poc.py` — all adapted to LNbits test fixtures and wallet mocks. Run full suite as regression gate.
 
 **Success Criteria:**
+
 1. The full bearer-asset threat suite passes against LNbits fixtures — no funds-loss regression across all security guarantees.
 2. All remaining tests from `lnurl-mint` are ported and pass, completing behavioral parity verification.
 

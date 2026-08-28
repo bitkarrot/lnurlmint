@@ -2,21 +2,21 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01
-status: complete
-last_updated: "2026-08-28T19:07:00.000Z"
+current_phase: 2 — Mint + Melt Vertical MVP
+status: Ready to plan
+last_updated: "2026-08-28T19:02:11.082Z"
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 3
   completed_plans: 3
-  percent: 100
+  percent: 14
 ---
 
 # State: lnurlmint
 
 **Project:** lnurlmint — LNbits extension implementing LUD-25 lnurlcash (Lightning bearer assets), ported from standalone `lnurl-mint` FastAPI app
-**Current Phase:** 01
+**Current Phase:** 2 — Mint + Melt Vertical MVP
 **Project Reference:** `.planning/ROADMAP.md`
 **Mode:** mvp
 **Started:** 2026-08-28
@@ -48,17 +48,20 @@ Phase 1 complete: the full per-wallet mint CRUD vertical slice is delivered — 
 - No new dependencies beyond LNbits' `pyproject.toml`
 
 ### Plan 01-01 Decisions
+
 - Extension imports as `lnbits.extensions.lnurlmint` (LNbits loader convention, not bare `lnurlmint`)
 - Vue uses `LNbits.api.request('GET', url, key)` — no `LNbits.api.get` helper exists in LNbits JS API
 - coincurve confirmed importable in LNbits venv (transitive dep); `_generate_mint_privkey` returns 64-char hex
 
 ### Plan 01-02 Decisions
+
 - spent/pending/minted/settled typed as `bool` in pydantic models — LNbits dict_to_model converts INTEGER 0/1 to bool (matches Mint.verify_enabled/sunset_mint from Plan 01)
 - `Note.state` is a `@property` (not a stored column) — derived from spent/pending flags: 'spent' > 'pending' > 'outstanding'
 - `created_at` pre-validator added to Note/MintRecord/MeltRecord (shared `_parse_created_at` helper) to accept date-only strings as UTC — mirrors giftcards' `parse_expires_at` pattern; Mint/CreateMint unchanged
 - mints_records.minted is the compare-and-set flag (UPDATE ... WHERE minted=0 + rowcount==1) for race-safe lazy settlement; notes.pending_payment_hash links stranded notes to their melt invoices for reconcile
 
 ### Plan 01-03 Decisions
+
 - DELETE endpoint pre-checks get_mint before delete_mint — without this, a cross-wallet DELETE returns 200 (delete_mint finds 0 outstanding notes via the wallet-scoped JOIN and deletes 0 rows, returning True); the get_mint check enforces the 404
 - count_outstanding_notes uses JOIN lnurlmint.notes n JOIN lnurlmint.mints m ON n.mint_id = m.id WHERE m.wallet = :wallet — the notes table has no wallet column, so wallet scoping is enforced via the JOIN on mints
 - UpdateMint root_validator only checks sendable bounds when both min_sendable_msat and max_sendable_msat are explicitly provided (partial update may set only one)
