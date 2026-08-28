@@ -3,7 +3,7 @@ from typing import Optional
 
 from lnbits.db import Database
 
-from .models import Mint
+from .models import Mint, MintRecord, Note
 
 db = Database("ext_lnurlmint")
 
@@ -22,6 +22,18 @@ _UPDATABLE_FIELDS = frozenset({
     "verify_enabled",
     "sunset_mint",
 })
+
+
+class PendingNoteError(Exception):
+    """Raised by mark_pending when a note is already pending a melt.
+
+    The confirm-before-burn state machine reserves a note (pending=1)
+    before sending the melt payment. If a second melt attempt targets a
+    note that is already reserved, this error signals the caller to
+    reject the duplicate melt (SEC-06 / TEST-01).
+    """
+
+    pass
 
 
 def _generate_mint_privkey() -> str:
@@ -139,3 +151,276 @@ async def delete_mint(mint_id: str, wallet_id: str) -> bool:
             {"id": mint_id, "wallet": wallet_id},
         )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Note state-machine CRUD (Phase 2 — confirm-before-burn primitives)
+#
+# These functions implement the note lifecycle that the LNURL endpoints
+# (Plans 02-03) and the confirm-before-burn background task (Plan 04) call.
+# Every multi-statement operation (settle_mint, mark_pending) uses a single
+# `async with db.connect() as conn:` block for atomicity (REC-03). The
+# compare-and-set pattern (UPDATE ... WHERE minted=0 + rowcount==1) protects
+# lazy settlement materialization from double-mint races (TEST-02).
+# ---------------------------------------------------------------------------
+
+
+async def get_mint_by_id(mint_id: str) -> Optional[Mint]:
+    """Return a mint by id without wallet scoping.
+
+    Used by public LNURL endpoints that have no auth context — the mint
+    id in the URL path identifies the mint, not the caller's wallet.
+    """
+    return await db.fetchone(
+        "SELECT * FROM lnurlmint.mints WHERE id = :id",
+        {"id": mint_id},
+        Mint,
+    )
+
+
+async def get_note(note_id: str, mint_id: str) -> Optional[Note]:
+    """Return a single note scoped by mint_id, or None if not found.
+
+    The JOIN on lnurlmint.mints enforces that the mint exists; the
+    mint_id scoping prevents cross-mint note access (SEC-07).
+    """
+    return await db.fetchone(
+        "SELECT n.* FROM lnurlmint.notes n "
+        "JOIN lnurlmint.mints m ON n.mint_id = m.id "
+        "WHERE n.id = :id AND n.mint_id = :mid",
+        {"id": note_id, "mid": mint_id},
+        Note,
+    )
+
+
+async def get_pending_mint_record(
+    payment_hash: str, mint_id: str
+) -> Optional[MintRecord]:
+    """Return a pending (unminted) mint record, or None.
+
+    Used by the lazy-settlement poll to check whether a mint invoice
+    is still awaiting note materialization.
+    """
+    return await db.fetchone(
+        "SELECT * FROM lnurlmint.mints_records "
+        "WHERE payment_hash = :ph AND mint_id = :mid AND minted = 0",
+        {"ph": payment_hash, "mid": mint_id},
+        MintRecord,
+    )
+
+
+async def mint_record_exists(payment_hash: str) -> bool:
+    """Check whether a mint record exists for a payment hash.
+
+    Used for self-mint rejection: a melt callback must reject a payment
+    hash that matches a mint invoice (the mint's own funding invoice).
+    """
+    row = await db.fetchone(
+        "SELECT 1 FROM lnurlmint.mints_records WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return row is not None
+
+
+async def melt_record_exists(payment_hash: str) -> bool:
+    """Check whether a melt record exists for a payment hash.
+
+    Used for duplicate-melt rejection (SEC-06): a melt callback must
+    reject a payment hash that has already been processed.
+    """
+    row = await db.fetchone(
+        "SELECT 1 FROM lnurlmint.melts WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return row is not None
+
+
+async def get_mint_id_for_note(note_id: str) -> Optional[str]:
+    """Return the mint_id that owns a note, or None.
+
+    Used by reconcile to resolve which wallet a stranded note belongs
+    to (the notes table has no wallet column; resolution is via the
+    mint_id FK to mints).
+    """
+    row = await db.fetchone(
+        "SELECT mint_id FROM lnurlmint.notes WHERE id = :id",
+        {"id": note_id},
+    )
+    return row["mint_id"] if row else None
+
+
+async def settle_mint(payment_hash: str) -> Optional[int]:
+    """Atomically materialize a note from a settled mint invoice.
+
+    Compare-and-set: UPDATE mints_records SET minted=1 WHERE minted=0,
+    check rowcount==1 (only the winner proceeds), then INSERT the note.
+    All in one `async with db.connect() as conn:` block for atomicity
+    (REC-03). Returns the note's amount_msat, or None if already
+    settled by a concurrent request (TEST-02 double-mint race guard).
+
+    The note id is the comment_hash if present (comment-protected mint,
+    Phase 4), otherwise the payment_hash (plain hash-keyed mint).
+    No spendable credential is stored — only its hash (SEC-02).
+    """
+    async with db.connect() as conn:
+        result = await conn.execute(
+            "UPDATE lnurlmint.mints_records SET minted = 1 "
+            "WHERE payment_hash = :ph AND minted = 0",
+            {"ph": payment_hash},
+        )
+        if result.rowcount != 1:
+            # Already settled by a concurrent request — no-op.
+            return None
+        row = await conn.fetchone(
+            "SELECT amount_msat, comment_hash, mint_id "
+            "FROM lnurlmint.mints_records WHERE payment_hash = :ph",
+            {"ph": payment_hash},
+        )
+        if row is None:
+            return None
+        note_id = (
+            row["comment_hash"] if row["comment_hash"] is not None
+            else payment_hash
+        )
+        await conn.execute(
+            "INSERT INTO lnurlmint.notes "
+            "(id, mint_id, amount_msat, spent, pending) "
+            "VALUES (:id, :mint_id, :amount, 0, 0)",
+            {
+                "id": note_id,
+                "mint_id": row["mint_id"],
+                "amount": row["amount_msat"],
+            },
+        )
+        return row["amount_msat"]
+
+
+async def mark_pending(
+    note_ids: list[str], payment_hash: str, mint_id: str
+) -> None:
+    """Reserve notes for an in-flight melt (all-or-nothing).
+
+    Validates ALL notes are non-pending and non-spent before updating
+    any — the validation loop runs first, raising before any UPDATE is
+    issued. Then marks each note pending=1 with the melt's payment_hash.
+    All in one `async with db.connect() as conn:` block for atomicity
+    (REC-03). The mint_id scoping (SEC-07) prevents cross-wallet note
+    access.
+
+    Raises:
+        PendingNoteError: if any note is already pending a melt.
+        ValueError: if any note is invalid or already spent.
+    """
+    async with db.connect() as conn:
+        # Validation loop — complete before any mutation.
+        for note_id in note_ids:
+            row = await conn.fetchone(
+                "SELECT pending FROM lnurlmint.notes "
+                "WHERE id = :id AND spent = 0 AND mint_id = :mid",
+                {"id": note_id, "mid": mint_id},
+            )
+            if row is None:
+                raise ValueError("Invalid or already spent k1.")
+            if row["pending"]:
+                raise PendingNoteError("pending")
+        # Update loop — only reached if all notes validated.
+        for note_id in note_ids:
+            await conn.execute(
+                "UPDATE lnurlmint.notes "
+                "SET pending = 1, pending_payment_hash = :ph "
+                "WHERE id = :id AND mint_id = :mid",
+                {"ph": payment_hash, "id": note_id, "mid": mint_id},
+            )
+
+
+async def finalize_melt(note_ids: list[str], mint_id: str) -> None:
+    """Burn notes for good after a confirmed melt settlement.
+
+    Sets spent=1, pending=0, pending_payment_hash=NULL for each note,
+    scoped by mint_id (SEC-07). Called only after positive settlement
+    confirmation (paid=True) — never on pending or unconfirmable state.
+    """
+    for note_id in note_ids:
+        await db.execute(
+            "UPDATE lnurlmint.notes "
+            "SET spent = 1, pending = 0, pending_payment_hash = NULL "
+            "WHERE id = :id AND mint_id = :mid",
+            {"id": note_id, "mid": mint_id},
+        )
+
+
+async def restore(note_ids: list[str], mint_id: str) -> None:
+    """Release a pending reservation after a confirmed melt failure.
+
+    Sets pending=0, pending_payment_hash=NULL for each note, scoped by
+    mint_id (SEC-07). Called only after positive failure confirmation
+    (paid=False) — never on pending or unconfirmable state (TEST-03
+    tristate: paid=None leaves the note pending).
+    """
+    for note_id in note_ids:
+        await db.execute(
+            "UPDATE lnurlmint.notes "
+            "SET pending = 0, pending_payment_hash = NULL "
+            "WHERE id = :id AND mint_id = :mid",
+            {"id": note_id, "mid": mint_id},
+        )
+
+
+async def pending_melts() -> dict[str, list[str]]:
+    """Return all pending notes grouped by melt payment_hash.
+
+    Returns a dict mapping payment_hash → [note_ids] for all pending
+    notes across ALL wallets (no wallet scoping — reconcile is a
+    system-level operation). The mint_id for each note is resolved
+    separately via get_mint_id_for_note when reconcile needs the
+    wallet_id for check_transaction_status.
+    """
+    rows = await db.fetchall(
+        "SELECT id, pending_payment_hash, mint_id "
+        "FROM lnurlmint.notes "
+        "WHERE pending = 1 AND spent = 0 "
+        "AND pending_payment_hash IS NOT NULL"
+    )
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        grouped.setdefault(row["pending_payment_hash"], []).append(row["id"])
+    return grouped
+
+
+async def record_melt(
+    payment_hash: str,
+    pr: str,
+    mint_id: str,
+    note_ids: str,
+    amount_msat: int,
+) -> None:
+    """Record a melt invoice for verify and duplicate-melt detection.
+
+    INSERT OR IGNORE so a re-record (e.g. reconcile retry) does not
+    fail. The settled flag starts at 0 and is set to 1 by
+    mark_melt_settled after positive settlement.
+    """
+    await db.execute(
+        "INSERT OR IGNORE INTO lnurlmint.melts "
+        "(payment_hash, mint_id, pr, note_ids, amount_msat, settled) "
+        "VALUES (:ph, :mid, :pr, :nids, :amount, 0)",
+        {
+            "ph": payment_hash,
+            "mid": mint_id,
+            "pr": pr,
+            "nids": note_ids,
+            "amount": amount_msat,
+        },
+    )
+
+
+async def mark_melt_settled(payment_hash: str) -> None:
+    """Mark a melt record as settled (burn confirmed).
+
+    Called after finalize_melt completes — the melt's payment_hash is
+    now positively settled, so verify can report it as such.
+    """
+    await db.execute(
+        "UPDATE lnurlmint.melts SET settled = 1 WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
