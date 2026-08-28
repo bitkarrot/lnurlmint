@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 2 — Mint + Melt Vertical MVP
 status: In progress
-last_updated: "2026-08-28T21:20:00.000Z"
+last_updated: "2026-08-28T21:40:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 8
-  completed_plans: 6
-  percent: 28
+  completed_plans: 7
+  percent: 31
 ---
 
 # State: lnurlmint
@@ -26,7 +26,7 @@ progress:
 | Phase | Name | Status | Plans Completed |
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
-| 2 | Mint + Melt Vertical MVP | in progress | 3/5 |
+| 2 | Mint + Melt Vertical MVP | in progress | 4/5 |
 | 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 02-03 complete: the redeem flow is in place — LUD-03 informational withdrawRequest (GET /lnurlmint/w/{mint_id}) that advertises a note's value WITHOUT burning it (rejects pending/spent/unknown, lazily settles via _try_settle_mint on first poll, echoes k1 verbatim); and the mutating melt callback (GET /lnurlmint/w/cb/{mint_id}) that validates the invoice via bolt11.decode, rejects self-mint (mint_record_exists, SEC-06) and duplicate-melt (melt_record_exists, SEC-06) payment hashes, atomically reserves the note via mark_pending, registers the melt as in-flight via _track_melt_start (SEC-03), records the melt invoice, replies {status:OK} immediately (LUD-03 compliance), and schedules the background _melt_pay task. REDEEM-06 validation: pr MUST NOT combine with multiple k1s or amount; h required when pr absent (Phase 2 returns "Rotate/split/merge not yet implemented." for valid h). The in-flight melt refcount registry (_in_flight_melts dict + asyncio.Lock, NOT a thread-level lock) is in services.py with _track_melt_start/_track_melt_end/_melt_in_flight primitives and a _melt_pay stub (Plan 04 implements the full tristate settlement). Plan 02-04 (confirm-before-burn + in-flight tracking + reconcile) can now replace the _melt_pay stub with the full tristate settlement and wire the reconcile task.
+Plan 02-04 complete: the confirm-before-burn state machine is fully implemented — _melt_pay pays the melt invoice and settles the note based on the tristate outcome (paid=True → finalize/burn, paid=False → restore, paid=None → leave pending). Every restore path goes through _confirm_payment first (SEC-01 — no naive except:restore). _confirm_payment retries check_transaction_status with backoff (default 1,2,4,8,16s; delays=() for single-attempt reconcile) using status.success/status.failed/status.paid is None directly — NEVER the .pending property (which is True for both None AND False, the single most critical tristate gotcha). The finally block always clears the in-flight registry (SEC-03). reconcile_pending_melts skips in-flight melts, resolves stranded notes with single-attempt confirmation, and logs+leaves pending for unconfirmable melts (NEVER auto-restore). boot_reconcile runs as a one-shot at startup. tasks.py defines wait_for_melt_reconcile (run_interval(60, reconcile_pending_melts)). lnurlmint_start schedules boot_reconcile + create_permanent_unique_task for the periodic reconcile (EXT-03). Plan 02-05 (critical PoC tests) can now port all 5 PoC tests against LNbits fixtures.
 
 ## Key Decisions Locked
 
@@ -94,6 +94,16 @@ Plan 02-03 complete: the redeem flow is in place — LUD-03 informational withdr
 - Self-mint rejection checks mint_record_exists (mints_records table) and duplicate-melt checks melt_record_exists (melts table) — both BEFORE mark_pending so no state is mutated on rejection
 - logger.debug in /w/cb logs only mint_id (not k1, pr, h, payment_hash, or query params) — SEC-05 no-secret-logging
 
+### Plan 02-04 Decisions
+
+- Task execution order adjusted to dependency order: Task 2 (_confirm_payment) → Task 1 (_melt_pay) → Task 3 (reconcile) → Task 4 (wiring) — _melt_pay calls _confirm_payment, so _confirm_payment must exist first for each commit to be self-consistent
+- _confirm_payment uses status.success/status.failed/status.paid is None directly — NEVER the .pending property (which is self.paid is not True, True for BOTH None AND False). Using .pending would treat confirmed failure as pending and retry forever. This is the single most critical tristate gotcha (RQ7 #1).
+- Rephrased comments to avoid the literal string "status.pending" (used ".pending property" instead) to satisfy the grep "status.pending returns no matches" acceptance criterion — the invariant is identical
+- _melt_pay's finally block calls _track_melt_end(payment_hash) unconditionally (no has_payment_hash guard) — matches the plan; if has_payment_hash is False, payment_hash is None and _track_melt_end(None) is a harmless no-op. In practice the melt callback only schedules _melt_pay for valid bolt11 invoices that always have a payment_hash.
+- boot_reconcile is NOT added to scheduled_tasks (one-shot that completes quickly; cancelled when event loop closes if still running) — matches the plan
+- lnurlmint_start uses local imports (inside the function) for create_permanent_unique_task, boot_reconcile, wait_for_melt_reconcile — avoids circular import at module load time, matches the giftcards pattern
+- reconcile_pending_melts NEVER auto-restores unconfirmable melts (paid=None) — logs and leaves pending for operator investigation. Auto-restoring would risk a double-spend if the HTLC is actually in flight.
+
 ## Notes
 
 - REQUIREMENTS.md stated 52 requirements; actual count is 63. Traceability updated with correct count.
@@ -105,6 +115,7 @@ Plan 02-03 complete: the redeem flow is in place — LUD-03 informational withdr
 - Plan 02-01 complete: note state-machine CRUD (13 functions + PendingNoteError) with compare-and-set lazy settlement, all-or-nothing mark_pending, mint_id-scoped mutations, and 4 LNURL wire models — all verified against SQLite. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build LNURL endpoints on these primitives.
 - Plan 02-02 complete: mint flow (LUD-06 payRequest + callback) with fee math protocol contracts (ECON-01..04), lazy settlement helper, and record_mint_record CRUD. The payRequest advertises fee-aware bounds + withdrawLink; the callback creates an invoice via LNbits and records a pending mint (net amount, minted=0) without materializing the note. _try_settle_mint materializes lazily on first /w poll. Plan 02-03 (melt flow) can now build the /w endpoint that calls _try_settle_mint.
 - Plan 02-03 complete: redeem flow (LUD-03 informational /w + melt callback /w/cb). The /w endpoint is purely informational — advertises note value without burning, rejects pending (SEC-04)/spent/unknown, lazily settles, echoes k1 verbatim. The /w/cb melt callback validates pr via bolt11.decode, rejects self-mint/duplicate payment hashes (SEC-06), atomically reserves via mark_pending, registers in-flight via _track_melt_start (SEC-03), records the melt, replies {status:OK} immediately, and schedules background _melt_pay. REDEEM-06 validation enforced. In-flight refcount registry (asyncio.Lock) + _melt_pay stub in services.py — Plan 04 implements the full tristate settlement.
+- Plan 02-04 complete: confirm-before-burn state machine + in-flight tracking + background reconcile. _melt_pay implements full tristate settlement (pay_invoice → _confirm_payment → paid=True finalize, paid=False restore, paid=None leave pending). Every restore path goes through _confirm_payment first (SEC-01). _confirm_payment uses status.success/status.failed/status.paid is None (NOT .pending). reconcile_pending_melts skips in-flight, single-attempt confirm, logs+leaves pending for unconfirmable. boot_reconcile one-shot at startup. tasks.py + lnurlmint_start/stop wired via create_permanent_unique_task (EXT-03). Plan 02-05 (critical PoC tests) can now port all 5 PoC tests.
 
 ---
-*Last updated: 2026-08-28 (plan 02-03 complete, Phase 2 in progress)*
+*Last updated: 2026-08-28 (plan 02-04 complete, Phase 2 in progress)*
