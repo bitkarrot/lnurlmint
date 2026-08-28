@@ -37,7 +37,7 @@ Phase 1 delivered the extension scaffold, complete data model (4 tables), and pe
 
 ### PoC Test Architecture
 - Port `FakeNode` pattern: monkeypatch `pay_invoice`/`check_payment_status` with controllable tristate behavior — direct port of source fixtures. Do NOT use LNbits' `FakeWallet` directly (can't easily model `paid=None` tristate).
-- Model `paid=None` (unconfirmable) as `check_payment_status` raising `ValueError` for ambiguous states (port source's `is_payment_complete` pattern) — `_confirm_payment` catches and returns `None`.
+- Model `paid=None` (unconfirmable) as `check_transaction_status` returning `PaymentPendingStatus` (`paid=None`) — `_confirm_payment` checks `status.paid is None` and retries, returning `None` after all retries exhausted. (The source's `ValueError`-raise pattern is replaced by LNbits' `PaymentStatus.paid=None` return.)
 - Test isolation: in-memory SQLite per test, `async with db.connect()` for setup/teardown — fast, isolated.
 - All 5 PoC tests in one plan (Plan 5): TEST-01 (double_melt/duplicate_melt), TEST-02 (a2_settle_race), TEST-03 (melt_restore_double_payout — tristate), TEST-04 (reconcile_inflight_race), TEST-05 (f2_pending_info_leak). They're interdependent and ship together per ROADMAP.
 

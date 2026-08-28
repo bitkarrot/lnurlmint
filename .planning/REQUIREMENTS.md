@@ -9,18 +9,18 @@ Requirements for initial release. Each maps to roadmap phases. Full LUD-25 behav
 
 ### Extension Scaffold
 
-- [ ] **EXT-01**: Extension is discoverable by LNbits' loader — `__init__.py` exports `lnurlmint_ext` (APIRouter prefix `/lnurlmint`), `lnurlmint_start`/`lnurlmint_stop`, `db`, `lnurlmint_static_files`; `manifest.json` and `config.json` are valid
-- [ ] **EXT-02**: Extension registers static files at `/lnurlmint/static` and serves Vue 3 SFCs via LNbits' vendor bundle system (following `giftcards` pattern)
+- [x] **EXT-01**: Extension is discoverable by LNbits' loader — `__init__.py` exports `lnurlmint_ext` (APIRouter prefix `/lnurlmint`), `lnurlmint_start`/`lnurlmint_stop`, `db`, `lnurlmint_static_files`; `manifest.json` and `config.json` are valid
+- [x] **EXT-02**: Extension registers static files at `/lnurlmint/static` and serves Vue 3 SFCs via LNbits' vendor bundle system (following `giftcards` pattern)
 - [ ] **EXT-03**: Extension start/stop lifecycle wires background tasks via `create_permanent_unique_task` (reconcile + health); stop cancels them cleanly
-- [ ] **EXT-04**: No new Python dependencies are added beyond what LNbits' `pyproject.toml` already declares (`bolt11`, `bech32`, `httpx`, `pyqrcode`, `loguru` are available; `pydantic-settings` v2 is replaced by pydantic v1 + `lnbits.settings.settings`; `qrcode` is replaced by `pyqrcode`)
+- [x] **EXT-04**: No new Python dependencies are added beyond what LNbits' `pyproject.toml` already declares (`bolt11`, `bech32`, `httpx`, `pyqrcode`, `loguru` are available; `pydantic-settings` v2 is replaced by pydantic v1 + `lnbits.settings.settings`; `qrcode` is replaced by `pyqrcode`)
 
 ### Data Model
 
-- [ ] **DATA-01**: `m001_initial` migration creates `lnurlmint.mints` table (per-wallet mint config: `id`, `wallet`, `username`, `base_url`, `onion_url`, `base_fee_msat`, `fee_percent_ppm`, `min_sendable_msat`, `max_sendable_msat`, `min_mint_msat`, `verify_enabled`, `sunset_mint`, `mint_privkey` (secp256k1 keypair for offline verification), `created_at`, `updated_at`)
-- [ ] **DATA-02**: `m001_initial` creates `lnurlmint.notes` table (bearer notes: `id` (sha256(k1) hex), `mint_id` FK → mints, `amount_msat`, `state` (outstanding/pending/spent), `minted` flag, `comment_hash` (nullable, for comment protection), `created_at`)
-- [ ] **DATA-03**: `m001_initial` creates `lnurlmint.mints_records` table (pending mints: `payment_hash`, `mint_id`, `pr`, `amount_msat`, `comment_hash`, `created_at`) and `lnurlmint.melts` table (pending/settled melts: `payment_hash`, `mint_id`, `note_ids`, `amount_msat`, `settled` flag, `pr`, `created_at`)
-- [ ] **DATA-04**: All models use pydantic v1 syntax (`validator`/`root_validator`/`class Config`, not v2 `field_validator`/`model_validator`), matching LNbits' pinned pydantic 1.10.26
-- [ ] **DATA-05**: Every query is scoped by `wallet_id` via JOIN on `mints.wallet` — no cross-wallet note access is possible (giftcards pattern)
+- [x] **DATA-01**: `m001_initial` migration creates `lnurlmint.mints` table (per-wallet mint config: `id`, `wallet`, `username`, `base_url`, `onion_url`, `base_fee_msat`, `fee_percent_ppm`, `min_sendable_msat`, `max_sendable_msat`, `min_mint_msat`, `verify_enabled`, `sunset_mint`, `mint_privkey` (secp256k1 keypair for offline verification), `created_at`, `updated_at`)
+- [x] **DATA-02**: `m001_initial` creates `lnurlmint.notes` table (bearer notes: `id` (sha256(k1) hex), `mint_id` FK → mints, `amount_msat`, `state` (outstanding/pending/spent), `minted` flag, `comment_hash` (nullable, for comment protection), `created_at`)
+- [x] **DATA-03**: `m001_initial` creates `lnurlmint.mints_records` table (pending mints: `payment_hash`, `mint_id`, `pr`, `amount_msat`, `comment_hash`, `created_at`) and `lnurlmint.melts` table (pending/settled melts: `payment_hash`, `mint_id`, `note_ids`, `amount_msat`, `settled` flag, `pr`, `created_at`)
+- [x] **DATA-04**: All models use pydantic v1 syntax (`validator`/`root_validator`/`class Config`, not v2 `field_validator`/`model_validator`), matching LNbits' pinned pydantic 1.10.26
+- [x] **DATA-05**: Every query is scoped by `wallet_id` via JOIN on `mints.wallet` — no cross-wallet note access is possible (giftcards pattern)
 
 ### Mint Lifecycle
 
@@ -98,7 +98,7 @@ Requirements for initial release. Each maps to roadmap phases. Full LUD-25 behav
 
 ### Testing
 
-- [ ] **TEST-01**: `test_poc_double_melt.py` ported: a note melted twice is rejected (pending state prevents second melt)
+- [ ] **TEST-01**: `test_poc_duplicate_melt.py` ported: a note melted twice is rejected (pending state prevents second melt)
 - [ ] **TEST-02**: `test_poc_a2_settle_race.py` ported: compare-and-set `UPDATE ... WHERE minted=0` + `INSERT` is atomic (no double-mint on concurrent settlement)
 - [ ] **TEST-03**: `test_melt_restore_double_payout_poc.py` ported: `pay_invoice` raising `PaymentError` with `paid=None` leaves the note pending, NOT restored (confirm-before-burn tristate)
 - [ ] **TEST-04**: `test_poc_reconcile_inflight_race.py` ported: reconcile skips in-flight melts (no double-spend from restore-during-live-payment)
@@ -149,15 +149,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXT-01 | 1 | pending |
-| EXT-02 | 1 | pending |
+| EXT-01 | 1 | Complete |
+| EXT-02 | 1 | Complete |
 | EXT-03 | 2 | pending |
-| EXT-04 | 1 | pending |
-| DATA-01 | 1 | pending |
-| DATA-02 | 1 | pending |
-| DATA-03 | 1 | pending |
-| DATA-04 | 1 | pending |
-| DATA-05 | 1 | pending |
+| EXT-04 | 1 | Complete |
+| DATA-01 | 1 | Complete |
+| DATA-02 | 1 | Complete |
+| DATA-03 | 1 | Complete |
+| DATA-04 | 1 | Complete |
+| DATA-05 | 1 | Complete |
 | MINT-01 | 2 | pending |
 | MINT-02 | 2 | pending |
 | MINT-03 | 2 | pending |
@@ -214,11 +214,13 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-10 | 7 | pending |
 
 **Coverage:**
+
 - v1 requirements: 63 total (EXT=4, DATA=5, MINT=5, REDEEM=7, SEC=7, REC=3, VER=4, COMM=3, SIGN=4, ECON=5, TOR=2, UI=4, TEST=10)
 - Mapped to phases: 63 (100%)
 - Unmapped: 0
 
 **Per-phase distribution:**
+
 - Phase 1 (Extension Scaffold + Data Model + Per-Wallet Mint CRUD): 8 requirements
 - Phase 2 (Mint + Melt Vertical MVP): 28 requirements
 - Phase 3 (Rotate + Split + Merge + Sunset): 7 requirements
