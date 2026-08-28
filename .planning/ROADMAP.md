@@ -44,7 +44,7 @@ Phase 1 (Foundation)
 **Requirements:** EXT-01, EXT-02, EXT-04, DATA-01, DATA-02, DATA-03, DATA-04, DATA-05 (8)
 
 **Plans:**
-1. **Extension scaffold** — `__init__.py` (`lnurlmint_ext` APIRouter, `lnurlmint_start`/`lnurlmint_stop` stubs, `lnurlmint_static_files`, `db`), `manifest.json`, `config.json`, static files registration at `/lnurlmint/static`. Verify no new dependencies beyond LNbits' `pyproject.toml`.
+1. **Extension scaffold + walking skeleton** ✅ — `__init__.py` (`lnurlmint_ext` APIRouter, `lnurlmint_start`/`lnurlmint_stop` stubs, `lnurlmint_static_files`, `db`), `manifest.json`, `config.json`, static files registration at `/lnurlmint/static`. m001_initial migration (mints table, 15 columns), Mint/CreateMint pydantic v1 models, mint CRUD, POST/GET management API, placeholder Vue page. E2E verified. *(Plan 01-01 complete — 2026-08-28)*
 2. **Data model + migrations** — `migrations.py` (`m001_initial`: `mints`, `notes`, `mints_records`, `melts` tables, all wallet-scoped via `mints.wallet` FK), `models.py` (pydantic v1 `Mint`, `Note`, `MintRecord`, `MeltRecord` + LNURL wire models). Establish the `async with db.connect() as conn:` transaction discipline in CRUD stubs.
 3. **Per-wallet mint CRUD + management API** — `crud.py` (mint row CRUD, all queries scoped by `wallet_id`), `views_api.py` (create/configure/list/delete mint via `require_admin_key`/`require_invoice_key` decorators). Cross-wallet isolation enforced at query layer.
 
