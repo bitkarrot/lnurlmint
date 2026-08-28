@@ -424,3 +424,36 @@ async def mark_melt_settled(payment_hash: str) -> None:
         "UPDATE lnurlmint.melts SET settled = 1 WHERE payment_hash = :ph",
         {"ph": payment_hash},
     )
+
+
+async def record_mint_record(
+    payment_hash: str,
+    mint_id: str,
+    pr: str,
+    amount_msat: int,
+    comment_hash: Optional[str] = None,
+) -> None:
+    """Record a pending mint invoice awaiting settlement.
+
+    Stores the NET amount (after fee) — the note is credited with
+    net_amount_msat when it materializes via settle_mint. The minted
+    flag starts at 0 (pending) and is flipped to 1 by settle_mint's
+    compare-and-set on first settlement poll. No spendable credential
+    is stored — only the payment hash and invoice string (SEC-02).
+
+    INSERT OR IGNORE handles the edge case where the same payment_hash
+    is submitted twice (the PRIMARY KEY constraint prevents duplicates).
+    Single-statement operation — no db.connect() block needed.
+    """
+    await db.execute(
+        "INSERT OR IGNORE INTO lnurlmint.mints_records "
+        "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
+        "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
+        {
+            "ph": payment_hash,
+            "mid": mint_id,
+            "pr": pr,
+            "amount": amount_msat,
+            "ch": comment_hash,
+        },
+    )
