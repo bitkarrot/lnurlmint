@@ -30,12 +30,12 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 - [ ] LUD-03 withdrawRequest (`/w`) and the mutating callback (`/w/cb`): melt, rotate, split, merge with `h`/`h2` preimage-hash semantics
 - [ ] LUD-21 verify (`/verify/{payment_hash}`) with the same `VERIFY_ENABLED` off-switch and comment-protection gating as `lnurl-mint`
 - [ ] LUD-25 comment protection (note keyed by WALLET-supplied `comment` hash, not the payment preimage)
-- [ ] Offline verification (`mintPubkey`, `sig`/`sig2` on rotate/split/merge) — adapted to whatever signing primitive LNbits' funding node exposes
+- [ ] Offline verification (`mintPubkey`, `sig`/`sig2` on rotate/split/merge) — per-mint secp256k1 keypair stored in DB (Option B: portable across all LNbits backends; `mintPubkey` is the mint's own key, not the node's)
 - [ ] Mint fees (`BASE_FEE_MSAT` / `FEE_PERCENT_PPM`), `MIN_MINT_MSAT` net-of-fee floor, fee-aware `minSendable`/`maxSendable` advertisement
 - [ ] Sunset mode (`SUNSET_MINT`) — reject mint and split, allow rotate/merge/melt
 - [ ] Note store backed by LNbits `Database` abstraction (SQLite + Postgres) replacing `lnurl-mint`'s standalone sqlite + module-level lock; preserve the confirm-before-burn / pending / reconcile discipline
 - [ ] Background melt reconciliation task wired into LNbits' `create_permanent_unique_task` lifecycle (replaces `server.py` lifespan + monitor)
-- [ ] LUD-16 Lightning Address integration via LNbits' existing `lnurlp` extension (mint advertises its payRequest through LNbits' address system, no `.well-known` route conflict)
+- [ ] Raw LNURL/QR payRequest + callback (mint serves its own `/lnurlmint/lnurlp/{mint_id}` and `/lnurlmint/p/cb/{mint_id}` — no `.well-known` route, no Lightning Address for v1)
 - [ ] Public one-pager frontend (mint QR, lightning address, mint limits, node info) ported from `lnurl-mint`'s `frontend.py`
 - [ ] Management SPA: wallet owner can create/configure their mint (fees, limits, sunset, verify toggle), view outstanding notes, see mint activity
 - [ ] Full test suite ported from `lnurl-mint` (~25 tests incl. security PoCs: double-spend, race, preimage leak, fee conservation, reconcile-inflight) adapted to LNbits test fixtures and wallet mocks
@@ -47,7 +47,8 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 - Bundling `lnurl-wallet` (the SolidJS bearer-note holder SPA) into this extension — it is a separate, mint-agnostic static app; a later phase may serve it as an extension sub-route, but v1 is mint-only
 - Direct lnd/cln REST funding (`node.py`'s own backend client) — LNbits already abstracts Lightning per-wallet; a "standalone lnd/cln" mode is explicitly rejected for v1 to keep the extension idiomatic
 - A single global mint — per-wallet multi-tenancy is the model; a global admin-only mint is not supported
-- Serving the mint's own `.well-known/lnurlp/{username}` / `.well-known/lnurlw/{username}` routes from the extension — Lightning Address resolution is delegated to LNbits' existing `lnurlp` extension to avoid route conflicts
+- Serving the mint's own `.well-known/lnurlp/{username}` / `.well-known/lnurlw/{username}` routes from the extension — Lightning Address (LUD-16) is deferred to v2; it requires structural changes to LNbits' `lnurlp` extension (adding a `withdrawLink` field to `LnurlPayResponse` + a delegation hook in its callback), not just requiring lnurlp to be running. v1 ships raw LNURL/QR instead.
+- Node-direct `signmessage` for offline verification (Option A) — rejected in favor of per-mint keypair (Option B) for portability across all LNbits backends (FakeWallet, VoidWallet, etc.); the tradeoff is `mintPubkey` is the mint's key, not the node's, so holders can't cross-verify against the Lightning node pubkey
 
 ## Context
 
@@ -104,11 +105,12 @@ A wallet holder can mint a Lightning-funded bearer note, hand it to anyone, and 
 | Extension name `lnurlmint` (not `lnurlcash`) | `lnurlcash` is the LUD-25 protocol name; reserving it for the broader ecosystem leaves `lnurlmint` as the clear mint/issuer implementation, matching the existing `lnurl-mint` repo | — Pending |
 | LNbits wallet as funding source (native) | LNbits already abstracts Lightning per-wallet; idiomatic fit, drops `node.py`'s lnd/cln REST client | — Pending |
 | Per-wallet mints | Fits LNbits' multi-tenant model; each user owns their mint instance, fees, limits, notes | — Pending |
-| Integrate with LNbits `lnurlp` for Lightning Address | Avoids `.well-known` route conflicts with LNbits' built-in lnurlp extension; reuses existing address resolution | — Pending |
+| Integrate with LNbits `lnurlp` for Lightning Address | Avoids `.well-known` route conflicts with LNbits' built-in lnurlp extension; reuses existing address resolution | ⚠️ Revisit — research found lnurlp needs structural changes (withdrawLink field + delegation hook); deferred to v2, v1 ships raw LNURL/QR |
 | Full feature parity with `lnurl-mint` for v1 | Mint/melt/rotate/split/merge + verify + offline signing + fees + sunset + comment protection + Tor — all of it | — Pending |
 | Port full test suite (security PoCs included) | The PoCs encode real funds-loss guarantees; a line-by-line-behavior port adapted to LNbits fixtures is non-negotiable | — Pending |
 | Management SPA + public one-pager | Per-wallet mints require a UI to create/configure; the public one-pager is the note-holder's face of the mint | — Pending |
 | `lnurl-wallet` stays separate for v1 | It is a mint-agnostic static SPA in a different framework (SolidJS); bundling it doubles frontend scope and conflates issuer/holder trust domains | — Pending |
+| Per-mint keypair for offline verification (Option B) | LNbits' `Wallet` abstraction doesn't expose `signmessage`; a per-mint secp256k1 keypair is portable across all backends (FakeWallet, VoidWallet). Tradeoff: `mintPubkey` is the mint's key, not the node's — holders can't cross-verify against the Lightning node pubkey | — Pending |
 
 ## Evolution
 
@@ -128,4 +130,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-28 after initialization*
+*Last updated: 2026-08-28 after research (Lightning Address deferred to v2, signing Option B chosen)*
