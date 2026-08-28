@@ -136,7 +136,17 @@ async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
     record = await get_pending_mint_record(note_id, mint.id)
     if record is None:
         return False
-    status = await check_transaction_status(mint.wallet, note_id)
+    # If the funding source is unreachable (connection error, timeout),
+    # catch the exception and return False (settlement not confirmed,
+    # try again later) instead of propagating a 500 to the /w or /w/cb
+    # endpoint (W-03 — preserves the LNURL error format invariant).
+    try:
+        status = await check_transaction_status(mint.wallet, note_id)
+    except Exception as exc:
+        logger.warning(
+            f"settle_mint: check_transaction_status failed for {note_id}: {exc}"
+        )
+        return False
     if status.success:
         net_amount = await settle_mint(note_id)
         return net_amount is not None
