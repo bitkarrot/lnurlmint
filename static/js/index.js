@@ -11,8 +11,21 @@ window.PageLnurlmint = {
   },
   methods: {
     async fetchMints() {
-      // Stub for Phase 1 Task 1 — wired to the management API in Task 3.
-      this.mints = []
+      this.loading = true
+      try {
+        const wallet = this.g.user.wallets[0]
+        const key = wallet.inkey || wallet.adminkey
+        const response = await LNbits.api.request(
+          'GET',
+          '/lnurlmint/api/v1/mints',
+          key
+        )
+        this.mints = response.data || []
+      } catch (error) {
+        LNbits.utils.notifyApiError(error)
+      } finally {
+        this.loading = false
+      }
     }
   }
 }
