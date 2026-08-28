@@ -13,6 +13,8 @@ credential, or the full request URL (SEC-05).
 
 import json
 import re
+from hashlib import sha256
+from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
@@ -20,8 +22,8 @@ from loguru import logger
 
 from lnbits.core.services.payments import create_invoice as lnbits_create_invoice
 
-from .crud import get_mint_by_id, record_mint_record
-from .services import _mint_fee_msat, _min_sendable_msat, _public_base_url
+from .crud import get_mint_by_id, get_note, record_mint_record
+from .services import _mint_fee_msat, _min_sendable_msat, _public_base_url, _try_settle_mint
 
 lnurlmint_lnurl_router = APIRouter()
 
@@ -129,3 +131,57 @@ async def get_pay_callback(mint_id: str, request: Request, amount: int) -> dict:
 
     logger.debug(f"lnurlmint: recorded pending mint for mint_id={mint_id}")
     return {"pr": pr, "disposable": False}
+
+
+@lnurlmint_lnurl_router.get("/w/{mint_id}")
+async def get_withdraw(
+    mint_id: str, request: Request, k1: str, amount: Optional[int] = None
+) -> dict:
+    """LUD-03 withdrawRequest — purely informational note-value advertisement.
+
+    Public endpoint (no auth). Advertises a note's value to any
+    spec-compliant LNURL-withdraw wallet WITHOUT burning or altering the
+    note. The `k1` is echoed verbatim (the raw bearer secret, never the
+    derived note id). `amount` is accepted for LUD-03 compliance but
+    ignored — `maxWithdrawable` is authoritative. If the note isn't
+    materialized yet, the first poll triggers lazy settlement via
+    _try_settle_mint (REDEEM-01). Pending notes are rejected (SEC-04 —
+    a pending note is never advertised as withdrawable). No mintPubkey
+    in Phase 2 (Phase 5 adds the per-mint keypair).
+
+    No logger call includes k1, request.url, or any query string (SEC-05).
+    """
+    mint = await get_mint_by_id(mint_id)
+    if mint is None:
+        return {"status": "ERROR", "reason": "Unknown mint."}
+
+    if not HEX32_PATTERN.match(k1):
+        return {"status": "ERROR", "reason": "Unknown note."}
+
+    # Store-hashes-not-secrets: the note id is sha256(k1), never the
+    # spendable credential itself (SEC-02).
+    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+
+    note = await get_note(note_id, mint_id)
+    if note is None:
+        # Not materialized yet — try lazy settlement on this poll.
+        settled = await _try_settle_mint(note_id, mint)
+        if settled:
+            note = await get_note(note_id, mint_id)
+
+    if note is None:
+        return {"status": "ERROR", "reason": "Unknown note."}
+    if note.pending:
+        return {"status": "ERROR", "reason": "pending"}
+    if note.spent:
+        return {"status": "ERROR", "reason": "Note already spent."}
+
+    base = _public_base_url(request, mint)
+    return {
+        "tag": "withdrawRequest",
+        "callback": f"{base}/lnurlmint/w/cb/{mint_id}",
+        "k1": k1,
+        "minWithdrawable": note.amount_msat,
+        "maxWithdrawable": note.amount_msat,
+        "defaultDescription": f"lnurlcash bearer note on {mint.username}",
+    }
