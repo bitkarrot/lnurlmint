@@ -467,3 +467,105 @@ async def record_mint_record(
             "ch": comment_hash,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# swap primitive (Phase 3 — rotate/split/merge core)
+#
+# swap atomically burns N notes and mints M notes in one
+# `async with db.connect() as conn:` block. It is the core primitive for
+# rotate (burn 1, mint 1), split (burn N, mint 2), and merge (burn N,
+# mint 1). The validate-then-burn-then-mint structure ensures no partial
+# state: ALL validation (burn ids + collision checks) completes before
+# ANY mutation (REC-03, SEC-06, TEST-08).
+#
+# LNbits' conn.execute commits per call — there is no automatic rollback
+# if a later statement fails. Separating validation from mutation
+# guarantees that if any check fails, nothing has been burned or minted
+# yet. The collision check on both mints_records (pending/settled mint
+# invoices) AND notes (existing notes) prevents the A1 pending-mint
+# squat attack (TEST-08): an attacker planting a note under a victim's
+# future note id would shadow that mint and brick settle_mint's INSERT
+# forever. The generic "Invalid or already spent k1." error message
+# reveals no information about which table collided (no info leak).
+# ---------------------------------------------------------------------------
+
+
+async def swap(
+    burn_ids: list[str],
+    mint_note_ids: list[str],
+    mint_amounts: list[int],
+    mint_id: str,
+) -> None:
+    """Atomically burn N notes and mint M notes in one db.connect() block.
+
+    Validate-then-burn-then-mint: all burn validations (not spent, not
+    pending) and all mint collision checks (notes + mints_records)
+    complete before any mutation. Raises ValueError on invalid/spent/
+    duplicate burn id or collision on either table; PendingNoteError on
+    pending burn id. The mint_id scoping (SEC-07) prevents cross-wallet
+    note access — all queries are scoped by mint_id.
+
+    The collision check on mints_records prevents the A1 pending-mint
+    squat attack (TEST-08): a squatter note planted under a victim's
+    future note id would shadow that mint and brick settle_mint's
+    INSERT forever. The generic error message reveals no information
+    about which table collided (no info leak).
+    """
+    async with db.connect() as conn:
+        # 1. Dedup check — duplicate burn ids or mint note ids are
+        # rejected before any validation. The source relies on the burn
+        # loop finding the note already spent on the second pass; our
+        # validate-then-burn structure doesn't burn during validation,
+        # so we check duplicates explicitly (RQ1 gotcha #5).
+        if len(set(burn_ids)) != len(burn_ids):
+            raise ValueError("Invalid or already spent k1.")
+        if len(set(mint_note_ids)) != len(mint_note_ids):
+            raise ValueError("Invalid or already spent k1.")
+
+        # 2. Validation phase — complete before any mutation.
+        for note_id in burn_ids:
+            row = await conn.fetchone(
+                "SELECT pending FROM lnurlmint.notes "
+                "WHERE id = :id AND spent = 0 AND mint_id = :mid",
+                {"id": note_id, "mid": mint_id},
+            )
+            if row is None:
+                raise ValueError("Invalid or already spent k1.")
+            if row["pending"]:
+                raise PendingNoteError("pending")
+        for note_id in mint_note_ids:
+            # Collision check: mints_records (pending/settled mint
+            # invoices) — prevents the A1 pending-mint squat attack.
+            collision = await conn.fetchone(
+                "SELECT 1 FROM lnurlmint.mints_records "
+                "WHERE payment_hash = :id",
+                {"id": note_id},
+            )
+            if collision is not None:
+                raise ValueError("Invalid or already spent k1.")
+            # Collision check: notes (existing outstanding/spent/pending
+            # notes) — prevents overwriting an existing note id.
+            collision = await conn.fetchone(
+                "SELECT 1 FROM lnurlmint.notes WHERE id = :id",
+                {"id": note_id},
+            )
+            if collision is not None:
+                raise ValueError("Invalid or already spent k1.")
+
+        # 3. Burn phase — all validated, no failure expected.
+        for note_id in burn_ids:
+            await conn.execute(
+                "UPDATE lnurlmint.notes SET spent = 1 "
+                "WHERE id = :id AND mint_id = :mid",
+                {"id": note_id, "mid": mint_id},
+            )
+
+        # 4. Mint phase — all collision-checked, no failure expected.
+        for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+            await conn.execute(
+                "INSERT INTO lnurlmint.notes "
+                "(id, mint_id, amount_msat, spent, pending) "
+                "VALUES (:id, :mint_id, :amount, 0, 0)",
+                {"id": note_id, "mint_id": mint_id, "amount": amount_msat},
+            )
