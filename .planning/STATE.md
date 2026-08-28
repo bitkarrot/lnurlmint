@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 3 — Rotate + Split + Merge + Sunset
-status: Executing plan 03-01 complete
-last_updated: "2026-08-28T22:05:00.000Z"
+status: Executing plan 03-02 complete
+last_updated: "2026-08-28T22:14:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 8
-  completed_plans: 9
-  percent: 32
+  completed_plans: 10
+  percent: 36
 ---
 
 # State: lnurlmint
@@ -27,7 +27,7 @@ progress:
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
 | 2 | Mint + Melt Vertical MVP | complete | 5/5 |
-| 3 | Rotate + Split + Merge + Sunset | in progress | 1/3 |
+| 3 | Rotate + Split + Merge + Sunset | in progress | 2/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
 | 6 | Tor + Frontend | pending | 0/3 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 03-01 complete: the `swap` primitive (atomic burn N + mint M with two-table collision check) and the rotate + merge callback branches are implemented. `crud.swap` uses validate-then-burn-then-mint in one `async with db.connect() as conn:` block — dedup check, validation phase (burn ids + collision check on mints_records AND notes), burn phase (UPDATE spent=1), mint phase (INSERT new notes). `services.sign_note` is a stub returning None (Phase 5 implements real signing). The `/w/cb` callback now handles rotate (single k1 + h, value-neutral) and merge (many k1 + h, refund=(n-1)*base_fee) via swap, returning `{"status":"OK"}`. The "not yet implemented" stub is replaced; a temporary "Split not available." guard rejects split until Plan 02. `_MAX_K1S=100` constant rejects too many k1s. All 8 Phase 2 tests still pass. Plan 02 (split) can now reuse swap with two mint notes; Plan 03 (sunset + PoCs) can test the collision check and fee conservation.
+Plan 03-02 complete: the split callback branch is implemented with correct fee arithmetic and h2 validation. The `/w/cb` callback now handles split (one/many k1 + amount + h + h2 → burn all, mint two notes: `amount` keyed by `h`, `change = total - amount - base_fee` keyed by `h2`). The fee arithmetic rejects `change_before_fee < base_fee` (negative change after fee) and `change_amount < 1` (zero-value note) — the split costs exactly one `base_fee_msat` from the change side, preventing fee dodging via dust splits. `h2` validation is added: required when `amount` is present, validated against `HEX32_PATTERN`. The shared k1 resolution loop is extracted before the split/rotate/merge branching point so both branches reuse it. The temporary "Split not available." guard is removed. `sign_note` is called for both h and h2 (stub returns None; Phase 5 adds real signatures). All 8 Phase 2 tests still pass. Plan 03 (sunset gating + collision griefing + fee conservation PoCs) can now test the split branch and complete Phase 3.
 
 ## Key Decisions Locked
 
@@ -130,6 +130,7 @@ Plan 03-01 complete: the `swap` primitive (atomic burn N + mint M with two-table
 - Plan 02-04 complete: confirm-before-burn state machine + in-flight tracking + background reconcile. _melt_pay implements full tristate settlement (pay_invoice → _confirm_payment → paid=True finalize, paid=False restore, paid=None leave pending). Every restore path goes through _confirm_payment first (SEC-01). _confirm_payment uses status.success/status.failed/status.paid is None (NOT .pending). reconcile_pending_melts skips in-flight, single-attempt confirm, logs+leaves pending for unconfirmable. boot_reconcile one-shot at startup. tasks.py + lnurlmint_start/stop wired via create_permanent_unique_task (EXT-03). Plan 02-05 (critical PoC tests) can now port all 5 PoC tests.
 - Plan 02-05 complete: 5 critical funds-loss security PoC tests ported and passing against LNbits fixtures — Phase 2 complete. TEST-01 (duplicate_melt), TEST-02 (a2_settle_race), TEST-03 (tristate — paid=None leaves pending NOT restored), TEST-04 (reconcile skips in-flight), TEST-05 (/w rejects pending notes). FakeNode/HodlNode/InFlightNode fixtures monkeypatch services.py + views_lnurl.py payment imports with controllable tristate. All 7 tests pass in 0.68s, stable across 3 runs. Phase 3 + Phase 4 can proceed in parallel.
 - Plan 03-01 complete: swap primitive (atomic burn N + mint M with validate-then-burn-then-mint and two-table collision check) + rotate/merge callback branches + sign_note stub. crud.swap uses 4 phases in one db.connect() block (dedup → validation → burn → mint); collision checks both mints_records AND notes (TEST-08 A1 squat prevention); all queries scoped by mint_id (SEC-07). /w/cb rotate (n=1, refund=0, value-neutral) and merge (n>1, refund=(n-1)*base_fee) via swap, returning {"status":"OK"}. _MAX_K1S=100 rejects too many k1s. Temporary "Split not available." guard until Plan 02. All 8 Phase 2 tests still pass.
+- Plan 03-02 complete: split callback branch with fee arithmetic and h2 validation. /w/cb split (one/many k1 + amount + h + h2 → burn all, mint two notes: amount keyed by h, change = total - amount - base_fee keyed by h2). Fee arithmetic rejects change_before_fee < base_fee (negative change) and change_amount < 1 (zero-value note) — split costs exactly one base_fee from the change side, preventing fee dodging via dust splits. h2 required when amount present, validated against HEX32_PATTERN. Shared k1 resolution loop extracted before split/rotate/merge branching point. Temporary "Split not available." guard removed. sign_note called for both h and h2 (stub). All 8 Phase 2 tests still pass.
 
 ### Plan 03-01 Decisions
 
@@ -142,5 +143,14 @@ Plan 03-01 complete: the `swap` primitive (atomic burn N + mint M with two-table
 - Temporary "Split not available." guard (not "Split not yet implemented.") avoids matching the "not yet implemented" grep acceptance criterion while still rejecting split requests until Plan 02
 - Added note.spent check in the rotate/merge resolution loop (in addition to pending check) — a spent note returns "Invalid or already spent k1." matching the melt branch; swap's validation phase is defense-in-depth
 
+### Plan 03-02 Decisions
+
+- Split branch placed BEFORE rotate/merge branch (if amount is not None → split; else → rotate/merge) — the amount parameter distinguishes the two branches
+- Shared k1 resolution loop moved before the split/rotate/merge branching point — Plan 01 had it inside the rotate/merge branch; Plan 02 extracts it so both branches reuse it without duplication
+- base_fee taken from the change side (not the amount) — prevents fee dodging via repeated dust splits; a holder can't avoid the fee by splitting into many small notes and melting each separately
+- change_amount < 1 rejection (not < 0) — a change of exactly 0 is a zero-value note which is never valid; a change of 1 msat (dust) IS allowed
+- Temporary "Split not available." guard removed — replaced by the full split branch with h2 validation and two-note mint arithmetic
+- sign_note called for both h and h2 (stub returns None) — Phase 5 implements real signing and captures the return values as sig/sig2
+
 ---
-*Last updated: 2026-08-28 (plan 03-01 complete, Phase 3 in progress)*
+*Last updated: 2026-08-28 (plan 03-02 complete, Phase 3 in progress)*
