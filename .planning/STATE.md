@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 2 — Mint + Melt Vertical MVP
 status: In progress
-last_updated: "2026-08-28T21:00:00.000Z"
+last_updated: "2026-08-28T21:20:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 8
-  completed_plans: 5
-  percent: 23
+  completed_plans: 6
+  percent: 28
 ---
 
 # State: lnurlmint
@@ -26,7 +26,7 @@ progress:
 | Phase | Name | Status | Plans Completed |
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
-| 2 | Mint + Melt Vertical MVP | in progress | 2/5 |
+| 2 | Mint + Melt Vertical MVP | in progress | 3/5 |
 | 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 02-02 complete: the mint flow is in place — LUD-06 payRequest (GET /lnurlmint/lnurlp/{mint_id}) with fee-aware minSendable/maxSendable, withdrawLink, and commentAllowed; mint callback (GET /lnurlmint/p/cb/{mint_id}) that creates an invoice via LNbits, records a pending mint (net amount after fee, minted=0), and returns {pr, disposable:false}. The note is NOT materialized at callback time — _try_settle_mint in services.py materializes it lazily on the first /w poll after settlement. Fee math protocol contracts (ECON-01..04) are in services.py: _mint_fee_msat (ceil rounding), _min_sendable_msat (fee-aware walk), max_mintable_msat, _melt_fee_limit_msat (max 0.5%/5000/mint_fee). record_mint_record CRUD helper stores the pending mint. Plan 02-03 (melt flow: informational /w + melt callback) can now build on these endpoints — the withdrawLink points to /w/{mint_id} which Plan 03 implements, and _try_settle_mint is ready for the /w poll to call.
+Plan 02-03 complete: the redeem flow is in place — LUD-03 informational withdrawRequest (GET /lnurlmint/w/{mint_id}) that advertises a note's value WITHOUT burning it (rejects pending/spent/unknown, lazily settles via _try_settle_mint on first poll, echoes k1 verbatim); and the mutating melt callback (GET /lnurlmint/w/cb/{mint_id}) that validates the invoice via bolt11.decode, rejects self-mint (mint_record_exists, SEC-06) and duplicate-melt (melt_record_exists, SEC-06) payment hashes, atomically reserves the note via mark_pending, registers the melt as in-flight via _track_melt_start (SEC-03), records the melt invoice, replies {status:OK} immediately (LUD-03 compliance), and schedules the background _melt_pay task. REDEEM-06 validation: pr MUST NOT combine with multiple k1s or amount; h required when pr absent (Phase 2 returns "Rotate/split/merge not yet implemented." for valid h). The in-flight melt refcount registry (_in_flight_melts dict + asyncio.Lock, NOT a thread-level lock) is in services.py with _track_melt_start/_track_melt_end/_melt_in_flight primitives and a _melt_pay stub (Plan 04 implements the full tristate settlement). Plan 02-04 (confirm-before-burn + in-flight tracking + reconcile) can now replace the _melt_pay stub with the full tristate settlement and wire the reconcile task.
 
 ## Key Decisions Locked
 
@@ -85,6 +85,15 @@ Plan 02-02 complete: the mint flow is in place — LUD-06 payRequest (GET /lnurl
 - LNURL errors returned as plain dicts (HTTP 200) not HTTPException — LUD-06 protocol compliance; the source uses HTTPException which is a different JSON shape
 - logger.debug in callback logs only mint_id (not payment_hash, pr, or query params) — SEC-05 no-secret-logging
 
+### Plan 02-03 Decisions
+
+- Task execution order adjusted to dependency order: Task 1 (/w) → Task 3 (in-flight registry stubs) → Task 2 (/w/cb) — Task 2 imports _track_melt_start and _melt_pay from services.py which are created in Task 3 (per the plan's depends_on note)
+- asyncio.Lock (NOT a thread-level lock) for the in-flight registry per CONTEXT.md — LNbits is async-native and the port's tests use asyncio.gather (not OS threads); all access is async/await
+- _melt_pay is a stub that logs a warning and clears the in-flight entry in finally: — Plan 04 replaces it with the full tristate settlement (pay_invoice → check_payment_status → finalize/restore/leave-pending)
+- h required when pr absent returns "missing h" for invalid/absent h, then "Rotate/split/merge not yet implemented." for valid h — Phase 3 implements rotate/split/merge; Phase 2 defers
+- Self-mint rejection checks mint_record_exists (mints_records table) and duplicate-melt checks melt_record_exists (melts table) — both BEFORE mark_pending so no state is mutated on rejection
+- logger.debug in /w/cb logs only mint_id (not k1, pr, h, payment_hash, or query params) — SEC-05 no-secret-logging
+
 ## Notes
 
 - REQUIREMENTS.md stated 52 requirements; actual count is 63. Traceability updated with correct count.
@@ -95,6 +104,7 @@ Plan 02-02 complete: the mint flow is in place — LUD-06 payRequest (GET /lnurl
 - Plan 01-03 complete: full per-wallet mint CRUD (get/update/delete) with cross-wallet isolation E2E-verified on all endpoints, outstanding-notes delete guard (409) with atomic check-and-delete, UpdateMint partial-update model, Vue create-mint form + delete button. Phase 1 complete.
 - Plan 02-01 complete: note state-machine CRUD (13 functions + PendingNoteError) with compare-and-set lazy settlement, all-or-nothing mark_pending, mint_id-scoped mutations, and 4 LNURL wire models — all verified against SQLite. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build LNURL endpoints on these primitives.
 - Plan 02-02 complete: mint flow (LUD-06 payRequest + callback) with fee math protocol contracts (ECON-01..04), lazy settlement helper, and record_mint_record CRUD. The payRequest advertises fee-aware bounds + withdrawLink; the callback creates an invoice via LNbits and records a pending mint (net amount, minted=0) without materializing the note. _try_settle_mint materializes lazily on first /w poll. Plan 02-03 (melt flow) can now build the /w endpoint that calls _try_settle_mint.
+- Plan 02-03 complete: redeem flow (LUD-03 informational /w + melt callback /w/cb). The /w endpoint is purely informational — advertises note value without burning, rejects pending (SEC-04)/spent/unknown, lazily settles, echoes k1 verbatim. The /w/cb melt callback validates pr via bolt11.decode, rejects self-mint/duplicate payment hashes (SEC-06), atomically reserves via mark_pending, registers in-flight via _track_melt_start (SEC-03), records the melt, replies {status:OK} immediately, and schedules background _melt_pay. REDEEM-06 validation enforced. In-flight refcount registry (asyncio.Lock) + _melt_pay stub in services.py — Plan 04 implements the full tristate settlement.
 
 ---
-*Last updated: 2026-08-28 (plan 02-02 complete, Phase 2 in progress)*
+*Last updated: 2026-08-28 (plan 02-03 complete, Phase 2 in progress)*
