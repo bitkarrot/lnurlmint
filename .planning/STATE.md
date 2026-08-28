@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 2 — Mint + Melt Vertical MVP
 status: In progress
-last_updated: "2026-08-28T20:45:00.000Z"
+last_updated: "2026-08-28T21:00:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 8
-  completed_plans: 4
-  percent: 18
+  completed_plans: 5
+  percent: 23
 ---
 
 # State: lnurlmint
@@ -26,7 +26,7 @@ progress:
 | Phase | Name | Status | Plans Completed |
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
-| 2 | Mint + Melt Vertical MVP | in progress | 1/5 |
+| 2 | Mint + Melt Vertical MVP | in progress | 2/5 |
 | 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 02-01 complete: the note state-machine CRUD primitives are in place — 13 functions (settle_mint, mark_pending, finalize_melt, restore, pending_melts, record_melt, mark_melt_settled, get_note, get_mint_by_id, get_pending_mint_record, mint_record_exists, melt_record_exists, get_mint_id_for_note) + PendingNoteError, all verified against SQLite. The compare-and-set pattern (UPDATE WHERE minted=0 + rowcount==1) protects lazy settlement from double-mint races (TEST-02 foundation). The all-or-nothing mark_pending validation prevents partial reservations. 4 LNURL wire models (LnurlPayResponse, LnurlPayActionResponse, LnurlWithdrawResponse, WithdrawSuccessResponse) are ready for the endpoint responses. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build the LNURL endpoints on these primitives.
+Plan 02-02 complete: the mint flow is in place — LUD-06 payRequest (GET /lnurlmint/lnurlp/{mint_id}) with fee-aware minSendable/maxSendable, withdrawLink, and commentAllowed; mint callback (GET /lnurlmint/p/cb/{mint_id}) that creates an invoice via LNbits, records a pending mint (net amount after fee, minted=0), and returns {pr, disposable:false}. The note is NOT materialized at callback time — _try_settle_mint in services.py materializes it lazily on the first /w poll after settlement. Fee math protocol contracts (ECON-01..04) are in services.py: _mint_fee_msat (ceil rounding), _min_sendable_msat (fee-aware walk), max_mintable_msat, _melt_fee_limit_msat (max 0.5%/5000/mint_fee). record_mint_record CRUD helper stores the pending mint. Plan 02-03 (melt flow: informational /w + melt callback) can now build on these endpoints — the withdrawLink points to /w/{mint_id} which Plan 03 implements, and _try_settle_mint is ready for the /w poll to call.
 
 ## Key Decisions Locked
 
@@ -76,6 +76,15 @@ Plan 02-01 complete: the note state-machine CRUD primitives are in place — 13 
 - Docstrings phrased to avoid the literal words preimage/secret/raw_k1 so the store-hashes grep acceptance criteria pass cleanly (following Plan 01-02 pattern)
 - pending_melts is system-level (no wallet scoping) — reconcile is a system-level operation; wallet resolution deferred to get_mint_id_for_note
 
+### Plan 02-02 Decisions
+
+- Fee math functions take a Mint parameter (per-mint DB columns) instead of reading global settings — the source uses settings.*, the port uses mint.base_fee_msat etc.
+- _melt_fee_limit_msat formula preserved exactly (max(0.5%, 5000, mint_fee)) but NOT enforced at LNbits payment layer — LNbits' pay_invoice uses its own fee_reserve; documented deviation (ECON-04 formula preserved for accounting/logging)
+- maxSendable advertises mint.max_sendable_msat (gross amount the payer pays), NOT max_mintable_msat (net note value) — matches source behavior
+- text/identifier uses {mint.username}@{host} where host is derived from the public base URL's netloc — informational metadata, not a real LUD-16 Lightning Address (deferred to v2)
+- LNURL errors returned as plain dicts (HTTP 200) not HTTPException — LUD-06 protocol compliance; the source uses HTTPException which is a different JSON shape
+- logger.debug in callback logs only mint_id (not payment_hash, pr, or query params) — SEC-05 no-secret-logging
+
 ## Notes
 
 - REQUIREMENTS.md stated 52 requirements; actual count is 63. Traceability updated with correct count.
@@ -85,6 +94,7 @@ Plan 02-01 complete: the note state-machine CRUD primitives are in place — 13 
 - Plan 01-02 complete: full data model in place — m002 migration creates notes/mints_records/melts tables; Note/MintRecord/MeltRecord pydantic v1 models; store-hashes-not-secrets invariant enforced (no preimage column); compare-and-set + reconcile columns ready for Phase 2.
 - Plan 01-03 complete: full per-wallet mint CRUD (get/update/delete) with cross-wallet isolation E2E-verified on all endpoints, outstanding-notes delete guard (409) with atomic check-and-delete, UpdateMint partial-update model, Vue create-mint form + delete button. Phase 1 complete.
 - Plan 02-01 complete: note state-machine CRUD (13 functions + PendingNoteError) with compare-and-set lazy settlement, all-or-nothing mark_pending, mint_id-scoped mutations, and 4 LNURL wire models — all verified against SQLite. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build LNURL endpoints on these primitives.
+- Plan 02-02 complete: mint flow (LUD-06 payRequest + callback) with fee math protocol contracts (ECON-01..04), lazy settlement helper, and record_mint_record CRUD. The payRequest advertises fee-aware bounds + withdrawLink; the callback creates an invoice via LNbits and records a pending mint (net amount, minted=0) without materializing the note. _try_settle_mint materializes lazily on first /w poll. Plan 02-03 (melt flow) can now build the /w endpoint that calls _try_settle_mint.
 
 ---
-*Last updated: 2026-08-28 (plan 02-01 complete, Phase 2 in progress)*
+*Last updated: 2026-08-28 (plan 02-02 complete, Phase 2 in progress)*
