@@ -149,13 +149,86 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated during roadmap creation) | | |
+| EXT-01 | 1 | pending |
+| EXT-02 | 1 | pending |
+| EXT-03 | 2 | pending |
+| EXT-04 | 1 | pending |
+| DATA-01 | 1 | pending |
+| DATA-02 | 1 | pending |
+| DATA-03 | 1 | pending |
+| DATA-04 | 1 | pending |
+| DATA-05 | 1 | pending |
+| MINT-01 | 2 | pending |
+| MINT-02 | 2 | pending |
+| MINT-03 | 2 | pending |
+| MINT-04 | 2 | pending |
+| MINT-05 | 2 | pending |
+| REDEEM-01 | 2 | pending |
+| REDEEM-02 | 2 | pending |
+| REDEEM-03 | 3 | pending |
+| REDEEM-04 | 3 | pending |
+| REDEEM-05 | 3 | pending |
+| REDEEM-06 | 2 | pending |
+| REDEEM-07 | 3 | pending |
+| SEC-01 | 2 | pending |
+| SEC-02 | 2 | pending |
+| SEC-03 | 2 | pending |
+| SEC-04 | 2 | pending |
+| SEC-05 | 2 | pending |
+| SEC-06 | 2 | pending |
+| SEC-07 | 2 | pending |
+| REC-01 | 2 | pending |
+| REC-02 | 2 | pending |
+| REC-03 | 2 | pending |
+| VER-01 | 4 | pending |
+| VER-02 | 4 | pending |
+| VER-03 | 4 | pending |
+| VER-04 | 4 | pending |
+| COMM-01 | 4 | pending |
+| COMM-02 | 4 | pending |
+| COMM-03 | 4 | pending |
+| SIGN-01 | 5 | pending |
+| SIGN-02 | 5 | pending |
+| SIGN-03 | 5 | pending |
+| SIGN-04 | 5 | pending |
+| ECON-01 | 2 | pending |
+| ECON-02 | 2 | pending |
+| ECON-03 | 2 | pending |
+| ECON-04 | 2 | pending |
+| ECON-05 | 3 | pending |
+| TOR-01 | 6 | pending |
+| TOR-02 | 6 | pending |
+| UI-01 | 6 | pending |
+| UI-02 | 6 | pending |
+| UI-03 | 6 | pending |
+| UI-04 | 6 | pending |
+| TEST-01 | 2 | pending |
+| TEST-02 | 2 | pending |
+| TEST-03 | 2 | pending |
+| TEST-04 | 2 | pending |
+| TEST-05 | 2 | pending |
+| TEST-06 | 3 | pending |
+| TEST-07 | 4 | pending |
+| TEST-08 | 3 | pending |
+| TEST-09 | 7 | pending |
+| TEST-10 | 7 | pending |
 
 **Coverage:**
-- v1 requirements: 52 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 52 ⚠️ (will be resolved by roadmap creation)
+- v1 requirements: 63 total (EXT=4, DATA=5, MINT=5, REDEEM=7, SEC=7, REC=3, VER=4, COMM=3, SIGN=4, ECON=5, TOR=2, UI=4, TEST=10)
+- Mapped to phases: 63 (100%)
+- Unmapped: 0
+
+**Per-phase distribution:**
+- Phase 1 (Extension Scaffold + Data Model + Per-Wallet Mint CRUD): 8 requirements
+- Phase 2 (Mint + Melt Vertical MVP): 28 requirements
+- Phase 3 (Rotate + Split + Merge + Sunset): 7 requirements
+- Phase 4 (Comment Protection + Verify): 8 requirements
+- Phase 5 (Offline Verification): 4 requirements
+- Phase 6 (Tor + Frontend): 6 requirements
+- Phase 7 (Full Test Suite Port): 2 requirements
+
+> **Note:** The original count of 52 was incorrect; the actual count across 13 categories is 63. This has been corrected in the traceability table and ROADMAP.md.
 
 ---
 *Requirements defined: 2026-08-28*
-*Last updated: 2026-08-28 after initial definition*
+*Last updated: 2026-08-28 after roadmap creation (traceability populated, count corrected to 63)*
