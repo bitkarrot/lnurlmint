@@ -77,6 +77,36 @@ class CreateMint(BaseModel):
         return values
 
 
+class UpdateMint(BaseModel):
+    """API request body for partially updating a mint config.
+
+    All fields are Optional so partial updates work (only provided,
+    non-None fields are applied). Immutable/server-generated fields
+    (id, wallet, mint_privkey, created_at, updated_at) are excluded —
+    only the 10 configurable parameters from CreateMint are updatable.
+    """
+
+    username: Optional[str] = None
+    base_fee_msat: Optional[int] = Field(None, ge=0)
+    fee_percent_ppm: Optional[int] = Field(None, ge=0, le=100_000)
+    min_sendable_msat: Optional[int] = Field(None, ge=1)
+    max_sendable_msat: Optional[int] = Field(None, ge=1)
+    min_mint_msat: Optional[int] = Field(None, ge=0)
+    verify_enabled: Optional[bool] = None
+    sunset_mint: Optional[bool] = None
+    base_url: Optional[str] = None
+    onion_url: Optional[str] = None
+
+    @root_validator
+    def _sendable_bounds_ordered(cls, values):
+        # Only validate when both bounds are explicitly provided.
+        min_s = values.get("min_sendable_msat")
+        max_s = values.get("max_sendable_msat")
+        if min_s is not None and max_s is not None and min_s > max_s:
+            raise ValueError("min_sendable_msat must be <= max_sendable_msat")
+        return values
+
+
 class Note(BaseModel):
     """DB row model for lnurlmint.notes — a bearer note.
 
