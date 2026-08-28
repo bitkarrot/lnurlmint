@@ -416,3 +416,29 @@ async def boot_reconcile() -> None:
         await reconcile_pending_melts()
     except Exception as exc:
         logger.error(f"boot reconcile failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Offline signing stub (Phase 3 — placeholder for Phase 5)
+#
+# sign_note is a stub that returns None so the rotate/split/merge callback
+# can call it without import errors. Phase 5 implements real recoverable
+# ECDSA signing over `LNURLcash:<amount>:<note_id_hex>` using the mint's
+# per-mint secp256k1 keypair (Option B — portable across all LNbits
+# backends). The return value is discarded in Phase 3 (responses carry
+# {"status":"OK"} without sig/sig2). Do NOT reference sign_note in other
+# production code paths until Phase 5.
+# ---------------------------------------------------------------------------
+
+
+async def sign_note(h: str, amount_msat: int, mint: Mint) -> None:
+    """Stub — Phase 5 implements real signing with per-mint keypair.
+
+    Returns None so the rotate/split/merge callback can call it without
+    import errors. Phase 5 will return a recoverable ECDSA signature
+    over `LNURLcash:<amount>:<h>` using the mint's private key
+    (coincurve), verifiable offline against the mint's advertised
+    mintPubkey. Signing failures will be swallowed (return None, never
+    raise) so a signing error never blocks a rotate/split/merge.
+    """
+    return None
