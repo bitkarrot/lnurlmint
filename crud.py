@@ -7,6 +7,22 @@ from .models import Mint
 
 db = Database("ext_lnurlmint")
 
+# Whitelist of column names that update_mint may set. This guards against
+# SQL injection via column-name interpolation (W-01) and prevents accidentally
+# updating immutable fields (id, wallet, mint_privkey, created_at, updated_at).
+_UPDATABLE_FIELDS = frozenset({
+    "username",
+    "base_url",
+    "onion_url",
+    "base_fee_msat",
+    "fee_percent_ppm",
+    "min_sendable_msat",
+    "max_sendable_msat",
+    "min_mint_msat",
+    "verify_enabled",
+    "sunset_mint",
+})
+
 
 def _generate_mint_privkey() -> str:
     """Generate a secp256k1 private key as a 64-char hex string.
@@ -60,6 +76,12 @@ async def update_mint(mint_id: str, wallet_id: str, **fields) -> Optional[Mint]:
     """
     if not fields:
         # Nothing to update — just return the current mint (or None).
+        return await get_mint(mint_id, wallet_id)
+
+    # Filter against the whitelist so only known-updatable column names
+    # reach the SQL string (W-01: guard against column-name injection).
+    fields = {k: v for k, v in fields.items() if k in _UPDATABLE_FIELDS}
+    if not fields:
         return await get_mint(mint_id, wallet_id)
 
     set_clauses = ", ".join(f"{k} = :{k}" for k in fields)
