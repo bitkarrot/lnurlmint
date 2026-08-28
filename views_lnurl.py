@@ -38,6 +38,7 @@ from .services import (
     _mint_fee_msat,
     _min_sendable_msat,
     _public_base_url,
+    _track_melt_end,
     _track_melt_start,
     _try_settle_mint,
 )
@@ -312,14 +313,23 @@ async def get_withdraw_callback(
     if decoded.has_payment_hash:
         await _track_melt_start(decoded.payment_hash)
 
-    # Record the melt invoice for verify and duplicate-melt detection.
-    if decoded.has_payment_hash:
-        await record_melt(
-            decoded.payment_hash, pr, mint.id, note_id, total_msat
-        )
-
-    # Schedule the background tristate settlement (Plan 04 implements).
-    background_tasks.add_task(_melt_pay, [note_id], pr, decoded, mint)
+    # Record the melt invoice and schedule the background tristate
+    # settlement (Plan 04 implements). If either raises (DB error during
+    # INSERT, or an unexpected exception from FastAPI's task scheduling),
+    # release the in-flight registration — _melt_pay is never scheduled,
+    # so its finally block (which calls _track_melt_end) never runs.
+    # Without this guard the note is stranded until process restart
+    # (W-01).
+    try:
+        if decoded.has_payment_hash:
+            await record_melt(
+                decoded.payment_hash, pr, mint.id, note_id, total_msat
+            )
+        background_tasks.add_task(_melt_pay, [note_id], pr, decoded, mint)
+    except Exception:
+        if decoded.has_payment_hash:
+            await _track_melt_end(decoded.payment_hash)
+        raise
 
     logger.debug(f"lnurlmint: scheduled melt for mint_id={mint_id}")
     return {"status": "OK"}
