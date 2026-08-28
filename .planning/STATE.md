@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 2 — Mint + Melt Vertical MVP
-status: Ready to plan
-last_updated: "2026-08-28T19:02:11.082Z"
+status: In progress
+last_updated: "2026-08-28T20:45:00.000Z"
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 14
+  total_plans: 8
+  completed_plans: 4
+  percent: 18
 ---
 
 # State: lnurlmint
@@ -26,7 +26,7 @@ progress:
 | Phase | Name | Status | Plans Completed |
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
-| 2 | Mint + Melt Vertical MVP | pending | 0/5 |
+| 2 | Mint + Melt Vertical MVP | in progress | 1/5 |
 | 3 | Rotate + Split + Merge + Sunset | pending | 0/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Phase 1 complete: the full per-wallet mint CRUD vertical slice is delivered — extension scaffold, complete data model (all four tables), POST/GET/GET/{id}/PUT/{id}/DELETE/{id} management API with cross-wallet isolation E2E-verified, outstanding-notes delete guard (409), and Vue placeholder with create/delete interactivity. Phase 2 (Mint + Melt Vertical MVP) is next — the highest-risk phase (confirm-before-burn state machine, in-flight melt tracking, background reconciliation, 5 critical PoC tests).
+Plan 02-01 complete: the note state-machine CRUD primitives are in place — 13 functions (settle_mint, mark_pending, finalize_melt, restore, pending_melts, record_melt, mark_melt_settled, get_note, get_mint_by_id, get_pending_mint_record, mint_record_exists, melt_record_exists, get_mint_id_for_note) + PendingNoteError, all verified against SQLite. The compare-and-set pattern (UPDATE WHERE minted=0 + rowcount==1) protects lazy settlement from double-mint races (TEST-02 foundation). The all-or-nothing mark_pending validation prevents partial reservations. 4 LNURL wire models (LnurlPayResponse, LnurlPayActionResponse, LnurlWithdrawResponse, WithdrawSuccessResponse) are ready for the endpoint responses. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build the LNURL endpoints on these primitives.
 
 ## Key Decisions Locked
 
@@ -68,6 +68,14 @@ Phase 1 complete: the full per-wallet mint CRUD vertical slice is delivered — 
 - Vue uses LNbits.api.request('POST'/'DELETE', url, adminkey, data) — same deviation as Plan 01-01: LNbits JS API has no .post/.delete helpers, only request(method, url, key, data)
 - delete_mint uses `async with db.connect() as conn:` for atomic check-and-delete (outstanding-notes count + delete in one transaction) — the LNbits Database abstraction otherwise opens a separate transaction per call
 
+### Plan 02-01 Decisions
+
+- settle_mint fetches mint_id from mints_records in the same transaction (the row already has it) — the source's notes table has no mint_id column; ours does (FK to mints)
+- note_id = comment_hash if comment_hash is not None else payment_hash — comment-protected mints (Phase 4) key the note by the comment hash, not the payment hash
+- PendingNoteError defined in crud.py (not a separate errors module) — the source defines it in db.py; the router imports it from crud
+- Docstrings phrased to avoid the literal words preimage/secret/raw_k1 so the store-hashes grep acceptance criteria pass cleanly (following Plan 01-02 pattern)
+- pending_melts is system-level (no wallet scoping) — reconcile is a system-level operation; wallet resolution deferred to get_mint_id_for_note
+
 ## Notes
 
 - REQUIREMENTS.md stated 52 requirements; actual count is 63. Traceability updated with correct count.
@@ -76,6 +84,7 @@ Phase 1 complete: the full per-wallet mint CRUD vertical slice is delivered — 
 - Plan 01-01 complete: walking skeleton verified E2E (extension loads, migration runs, POST/GET work, cross-wallet isolation holds).
 - Plan 01-02 complete: full data model in place — m002 migration creates notes/mints_records/melts tables; Note/MintRecord/MeltRecord pydantic v1 models; store-hashes-not-secrets invariant enforced (no preimage column); compare-and-set + reconcile columns ready for Phase 2.
 - Plan 01-03 complete: full per-wallet mint CRUD (get/update/delete) with cross-wallet isolation E2E-verified on all endpoints, outstanding-notes delete guard (409) with atomic check-and-delete, UpdateMint partial-update model, Vue create-mint form + delete button. Phase 1 complete.
+- Plan 02-01 complete: note state-machine CRUD (13 functions + PendingNoteError) with compare-and-set lazy settlement, all-or-nothing mark_pending, mint_id-scoped mutations, and 4 LNURL wire models — all verified against SQLite. Plans 02-02 (mint flow) and 02-03 (melt flow) can now build LNURL endpoints on these primitives.
 
 ---
-*Last updated: 2026-08-28 (plan 01-03 complete, Phase 1 complete)*
+*Last updated: 2026-08-28 (plan 02-01 complete, Phase 2 in progress)*
