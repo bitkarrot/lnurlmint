@@ -108,10 +108,16 @@ async def api_delete_mint(
     Returns 409 Conflict if the mint has outstanding (unspent) notes —
     deleting a mint with outstanding bearer notes would orphan them
     (a funds-loss scenario). Returns 404 if the mint does not exist or
-    belongs to another wallet (delete_mint deletes 0 rows in that case,
-    but the preceding get_mint check in the caller's flow enforces the
-    404; here we simply succeed since no rows were harmed).
+    belongs to another wallet (checked via get_mint before deleting).
     """
+    # Verify the mint exists and belongs to this wallet before deleting.
+    # Without this, a cross-wallet delete returns 200 (delete_mint finds
+    # 0 outstanding notes via the wallet-scoped JOIN and deletes 0 rows,
+    # returning True) — the caller would see success for a mint it
+    # doesn't own. The get_mint check enforces the 404.
+    mint = await get_mint(mint_id, wallet.wallet.id)
+    if mint is None:
+        raise HTTPException(status_code=404, detail="Mint not found")
     deleted = await delete_mint(mint_id, wallet.wallet.id)
     if not deleted:
         raise HTTPException(
