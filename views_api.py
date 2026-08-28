@@ -14,7 +14,7 @@ from .crud import (
     update_mint,
     _generate_mint_privkey,
 )
-from .models import Mint, CreateMint, UpdateMint
+from .models import Mint, CreateMint, UpdateMint, MintResponse
 
 lnurlmint_api_router = APIRouter(prefix="/api/v1/mints")
 
@@ -50,7 +50,7 @@ async def api_create_mint(
         updated_at=now,
     )
     await create_mint(mint)
-    return mint.dict()
+    return MintResponse(**mint.dict(exclude={"mint_privkey"})).dict()
 
 
 @lnurlmint_api_router.get("")
@@ -59,7 +59,7 @@ async def api_get_mints(
 ) -> list:
     """List all mints owned by the authenticated wallet (wallet-scoped)."""
     mints = await get_mints_by_wallet(wallet.wallet.id)
-    return [m.dict() for m in mints]
+    return [MintResponse(**m.dict(exclude={"mint_privkey"})).dict() for m in mints]
 
 
 @lnurlmint_api_router.get("/{mint_id}")
@@ -75,7 +75,7 @@ async def api_get_mint(
     mint = await get_mint(mint_id, wallet.wallet.id)
     if mint is None:
         raise HTTPException(status_code=404, detail="Mint not found")
-    return mint.dict()
+    return MintResponse(**mint.dict(exclude={"mint_privkey"})).dict()
 
 
 @lnurlmint_api_router.put("/{mint_id}")
@@ -95,7 +95,7 @@ async def api_update_mint(
     mint = await update_mint(mint_id, wallet.wallet.id, **fields)
     if mint is None:
         raise HTTPException(status_code=404, detail="Mint not found")
-    return mint.dict()
+    return MintResponse(**mint.dict(exclude={"mint_privkey"})).dict()
 
 
 @lnurlmint_api_router.delete("/{mint_id}")

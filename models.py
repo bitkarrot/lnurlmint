@@ -52,6 +52,30 @@ class Mint(BaseModel):
     updated_at: datetime
 
 
+class MintResponse(BaseModel):
+    """API response model — mint config without the signing key.
+
+    The `mint_privkey` (secp256k1 private signing key) is never included
+    in API responses. It must never leave the server after creation;
+    leaking it allows forging mint signatures (C-01).
+    """
+
+    id: str
+    wallet: str
+    username: str
+    base_url: str = ""
+    onion_url: Optional[str] = None
+    base_fee_msat: int = 0
+    fee_percent_ppm: int = 0
+    min_sendable_msat: int = 1000
+    max_sendable_msat: int = 1_000_000_000
+    min_mint_msat: int = 10_000
+    verify_enabled: bool = True
+    sunset_mint: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
 class CreateMint(BaseModel):
     """API request body for creating a mint.
 
