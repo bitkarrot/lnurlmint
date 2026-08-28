@@ -270,6 +270,15 @@ async def get_withdraw_callback(
             "reason": f"Too many k1s (max {_MAX_K1S}).",
         }
 
+    # Sunset: split grows outstanding notes (one becomes two), rejected
+    # while sunsetting. rotate/merge/melt are unaffected — none increase
+    # outstanding liability (ECON-05).
+    if mint.sunset_mint and amount is not None:
+        return {
+            "status": "ERROR",
+            "reason": "This mint is sunsetting - splitting is disabled.",
+        }
+
     # h required when pr is absent (REDEEM-06). h2 required when amount
     # is present (split — REDEEM-06).
     if pr is None:
