@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 3 — Rotate + Split + Merge + Sunset
-status: Executing plan 03-02 complete
-last_updated: "2026-08-28T22:14:00.000Z"
+status: Phase 3 complete (all 3 plans done)
+last_updated: "2026-08-28T22:17:00.000Z"
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 8
-  completed_plans: 10
-  percent: 36
+  completed_plans: 11
+  percent: 39
 ---
 
 # State: lnurlmint
@@ -27,7 +27,7 @@ progress:
 |-------|------|--------|----------------|
 | 1 | Extension Scaffold + Data Model + Per-Wallet Mint CRUD | complete | 3/3 |
 | 2 | Mint + Melt Vertical MVP | complete | 5/5 |
-| 3 | Rotate + Split + Merge + Sunset | in progress | 2/3 |
+| 3 | Rotate + Split + Merge + Sunset | complete | 3/3 |
 | 4 | Comment Protection + Verify | pending | 0/3 |
 | 5 | Offline Verification | pending | 0/2 |
 | 6 | Tor + Frontend | pending | 0/3 |
@@ -35,7 +35,7 @@ progress:
 
 ## Current Focus
 
-Plan 03-02 complete: the split callback branch is implemented with correct fee arithmetic and h2 validation. The `/w/cb` callback now handles split (one/many k1 + amount + h + h2 → burn all, mint two notes: `amount` keyed by `h`, `change = total - amount - base_fee` keyed by `h2`). The fee arithmetic rejects `change_before_fee < base_fee` (negative change after fee) and `change_amount < 1` (zero-value note) — the split costs exactly one `base_fee_msat` from the change side, preventing fee dodging via dust splits. `h2` validation is added: required when `amount` is present, validated against `HEX32_PATTERN`. The shared k1 resolution loop is extracted before the split/rotate/merge branching point so both branches reuse it. The temporary "Split not available." guard is removed. `sign_note` is called for both h and h2 (stub returns None; Phase 5 adds real signatures). All 8 Phase 2 tests still pass. Plan 03 (sunset gating + collision griefing + fee conservation PoCs) can now test the split branch and complete Phase 3.
+Plan 03-03 complete: sunset mode gating and 3 PoC test suites ported and passing — Phase 3 complete. Sunset split gating rejects split (amount is not None) in `/w/cb` when `mint.sunset_mint` with `{"status":"ERROR","reason":"This mint is sunsetting - splitting is disabled."}` (ECON-05). Rotate/merge/melt are unaffected (none increase outstanding liability). The `/p/cb` sunset check is already implemented from Phase 2. Three PoC test suites ported: `test_poc_fee_conservation.py` (9 tests — white-box Ledger proving `paid_in == outstanding + melted_out + fees - refunds` after every operation, `attacker_gain <= 0`), `test_poc_fee_loop.py` (6 tests — CreateMint bounds validation, `_min_sendable_msat` termination, iteration cap RuntimeError), `test_poc_a1_collision_griefing.py` (6 tests — swap collision-checks both mints_records AND notes, squat rejected atomically, victim mint materializes). `fresh_secret()` helper added to conftest.py. All 29 tests pass (8 existing + 21 new), stable across 2 runs. Phase 3 is complete — Phase 4 (Comment Protection + Verify) and Phase 5 (Offline Verification) can proceed.
 
 ## Key Decisions Locked
 
@@ -131,6 +131,7 @@ Plan 03-02 complete: the split callback branch is implemented with correct fee a
 - Plan 02-05 complete: 5 critical funds-loss security PoC tests ported and passing against LNbits fixtures — Phase 2 complete. TEST-01 (duplicate_melt), TEST-02 (a2_settle_race), TEST-03 (tristate — paid=None leaves pending NOT restored), TEST-04 (reconcile skips in-flight), TEST-05 (/w rejects pending notes). FakeNode/HodlNode/InFlightNode fixtures monkeypatch services.py + views_lnurl.py payment imports with controllable tristate. All 7 tests pass in 0.68s, stable across 3 runs. Phase 3 + Phase 4 can proceed in parallel.
 - Plan 03-01 complete: swap primitive (atomic burn N + mint M with validate-then-burn-then-mint and two-table collision check) + rotate/merge callback branches + sign_note stub. crud.swap uses 4 phases in one db.connect() block (dedup → validation → burn → mint); collision checks both mints_records AND notes (TEST-08 A1 squat prevention); all queries scoped by mint_id (SEC-07). /w/cb rotate (n=1, refund=0, value-neutral) and merge (n>1, refund=(n-1)*base_fee) via swap, returning {"status":"OK"}. _MAX_K1S=100 rejects too many k1s. Temporary "Split not available." guard until Plan 02. All 8 Phase 2 tests still pass.
 - Plan 03-02 complete: split callback branch with fee arithmetic and h2 validation. /w/cb split (one/many k1 + amount + h + h2 → burn all, mint two notes: amount keyed by h, change = total - amount - base_fee keyed by h2). Fee arithmetic rejects change_before_fee < base_fee (negative change) and change_amount < 1 (zero-value note) — split costs exactly one base_fee from the change side, preventing fee dodging via dust splits. h2 required when amount present, validated against HEX32_PATTERN. Shared k1 resolution loop extracted before split/rotate/merge branching point. Temporary "Split not available." guard removed. sign_note called for both h and h2 (stub). All 8 Phase 2 tests still pass.
+- Plan 03-03 complete: sunset split gating + 3 PoC test suites (fee conservation, fee loop, collision griefing). Sunset rejects split (amount is not None) in /w/cb when mint.sunset_mint — rotate/merge/melt unaffected (ECON-05). fresh_secret() helper added to conftest.py. test_poc_fee_conservation.py (9 tests — white-box Ledger proving paid_in == outstanding + melted_out + fees - refunds, attacker_gain <= 0). test_poc_fee_loop.py (6 tests — CreateMint bounds, _min_sendable_msat termination, iteration cap). test_poc_a1_collision_griefing.py (6 tests — swap collision-checks both mints_records AND notes, squat rejected atomically, victim survives). All 29 tests pass (8 existing + 21 new). Phase 3 complete.
 
 ### Plan 03-01 Decisions
 
@@ -152,5 +153,15 @@ Plan 03-02 complete: the split callback branch is implemented with correct fee a
 - Temporary "Split not available." guard removed — replaced by the full split branch with h2 validation and two-note mint arithmetic
 - sign_note called for both h and h2 (stub returns None) — Phase 5 implements real signing and captures the return values as sig/sig2
 
+### Plan 03-03 Decisions
+
+- Sunset split check placed BEFORE h/h2 validation (not after) — so a sunsetting mint rejects split even if h/h2 are missing; rotate/merge/melt are unaffected (none increase outstanding liability)
+- Ledger calls endpoint functions directly (get_pay_callback, get_withdraw_callback) rather than via httpx AsyncClient — follows the Phase 2 test pattern (MagicMock for Request, bare BackgroundTasks)
+- Fee settings updated via update_mint(TEST_MINT_ID, TEST_WALLET, ...) instead of monkeypatching global settings — the port's fee fields are per-mint DB columns; update_mint bypasses pydantic validation (filters against _UPDATABLE_FIELDS only), allowing fee_percent_ppm=1_000_000 for the iteration cap test
+- Ledger.mint decodes the returned pr via bolt11.decode to recover payment_hash, then looks up node.preimages[payment_hash] for k1 — the port's FakeNode stores preimages in a dict (not last_preimage attribute like the source)
+- Pending victim mint created via record_mint_record (not /p/cb) — gives direct control over the payment_hash; victim mint materialized via _try_settle_mint after the squat is rejected
+- CreateMint requires username (required field) — the source's Settings has no username; valid CreateMint constructions in fee loop tests pass username='t'
+- test_zero_health_check_interval NOT ported — LNbits has no funding_source_health_check_interval_seconds setting
+
 ---
-*Last updated: 2026-08-28 (plan 03-02 complete, Phase 3 in progress)*
+*Last updated: 2026-08-28 (plan 03-03 complete, Phase 3 complete)*
