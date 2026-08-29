@@ -111,6 +111,8 @@ class FakeNode:
         self.payment_actually_completed: bool = False
         self.is_payment_complete_raises: bool = False
         self.pay_delay: float = 0.0
+        self.last_fee_limit_msat: Optional[int] = None
+        self.check_transaction_status_calls: int = 0
         # InFlightNode coordination events (harmless on the base class).
         self.pay_started: asyncio.Event = asyncio.Event()
         self.pay_release: asyncio.Event = asyncio.Event()
@@ -146,6 +148,7 @@ class FakeNode:
             raise PaymentError("Payment failed: no route.", status="failed")
         decoded = bolt11.decode(payment_request)
         self.paid.append(payment_request)
+        self.last_fee_limit_msat = kwargs.get("fee_limit_msat")
         if decoded.has_payment_hash:
             self.settled.add(decoded.payment_hash)
         return Payment(
@@ -165,6 +168,7 @@ class FakeNode:
         ``paid=None`` (pending) — the unconfirmable case that must NOT
         trigger a restore (TEST-03).
         """
+        self.check_transaction_status_calls += 1
         if self.is_payment_complete_raises:
             raise ConnectionError("funding source unreachable")
         if self.payment_actually_completed:
@@ -416,3 +420,55 @@ async def mint_note_with_comment(node: FakeNode, amount_msat: int = 50_000):
     note_id = comment_hash
     await _try_settle_mint(note_id, mint)
     return victim_secret, comment_hash, note_id, payment_hash, mint
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 helpers — note_value, _leave_a_note_pending
+# ---------------------------------------------------------------------------
+
+
+async def note_value(k1: str) -> Optional[int]:
+    """Check a note's value via the informational /w endpoint.
+
+    Returns ``maxWithdrawable`` (msat) if the note is live, or ``None``
+    if the endpoint returns an error (unknown or spent k1). Mirrors the
+    source's ``notes.note_amount`` helper but goes through the real
+    endpoint so the full LNURL path is exercised.
+    """
+    from unittest.mock import MagicMock
+
+    from lnurlmint.views_lnurl import get_withdraw
+
+    req = MagicMock()
+    req.base_url = "http://test/"
+    r = await get_withdraw(TEST_MINT_ID, req, k1=k1)
+    if r.get("status") == "ERROR":
+        return None
+    return r.get("maxWithdrawable")
+
+
+async def _leave_a_note_pending(node, amount_msat: int = 5000) -> str:
+    """Mint a note, then melt it with an unconfirmable payment.
+
+    Leaves the note in the pending state (melt in-flight, payment status
+    unknown) and returns the original k1. Used by reconcile and pending
+    tests that need a stranded note.
+    """
+    from unittest.mock import MagicMock
+
+    from fastapi import BackgroundTasks
+
+    from lnurlmint.views_lnurl import get_withdraw_callback
+
+    k1, note_id, mint = await mint_note(node, amount_msat)
+    node.fail_payments = True
+    node.is_payment_complete_raises = True
+    pr = fake_invoice(amount_msat)
+    await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(),
+        k1=[k1], pr=pr,
+    )
+    # Verify the note is pending
+    val = await note_value(k1)
+    assert val is not None, "note should still be queryable while pending"
+    return k1
