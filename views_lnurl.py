@@ -48,6 +48,7 @@ from .services import (
     _verify_mint,
     sign_note,
 )
+from .signing import mint_pubkey
 
 lnurlmint_lnurl_router = APIRouter()
 
@@ -246,8 +247,9 @@ async def get_withdraw(
     ignored — `maxWithdrawable` is authoritative. If the note isn't
     materialized yet, the first poll triggers lazy settlement via
     _try_settle_mint (REDEEM-01). Pending notes are rejected (SEC-04 —
-    a pending note is never advertised as withdrawable). No mintPubkey
-    in Phase 2 (Phase 5 adds the per-mint keypair).
+    a pending note is never advertised as withdrawable). mintPubkey is
+    the mint's own secp256k1 public key (Option B), advertised for LUD-25
+    offline verification of rotate/split/merge signatures.
 
     No logger call includes k1, request.url, or any query string (SEC-05).
     """
@@ -284,6 +286,7 @@ async def get_withdraw(
         "minWithdrawable": note.amount_msat,
         "maxWithdrawable": note.amount_msat,
         "defaultDescription": f"lnurlcash bearer note on {mint.username}",
+        "mintPubkey": mint_pubkey(mint),
     }
 
 
