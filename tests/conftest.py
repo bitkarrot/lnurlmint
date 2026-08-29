@@ -173,6 +173,31 @@ class FakeNode:
             return PaymentSuccessStatus()
         return PaymentPendingStatus()  # paid=None
 
+    async def get_standalone_payment(
+        self, checking_id_or_hash, incoming=None, **kwargs
+    ):
+        """Replacement for ``lnbits.core.crud.payments.get_standalone_payment``.
+
+        Returns a ``Payment`` with ``.preimage`` from the ``preimages``
+        dict (keyed by payment_hash), or ``None`` if not found. Used by
+        the LUD-21 verify helpers (``_mint_preimage`` / ``_melt_preimage``)
+        to fetch the preimage live on every verify call (SEC-02).
+        """
+        ph = checking_id_or_hash
+        preimage = self.preimages.get(ph)
+        if preimage is None:
+            return None
+        return Payment(
+            checking_id=ph,
+            payment_hash=ph,
+            wallet_id="",
+            amount=50_000 if incoming else -50_000,
+            fee=0,
+            bolt11="",
+            status=PaymentState.SUCCESS,
+            preimage=preimage,
+        )
+
 
 class HodlNode(FakeNode):
     """Models a hodl/ambiguous payment — ``paid=None`` while an HTLC is live.
@@ -268,6 +293,10 @@ def _patch_services(monkeypatch, fake) -> None:
     monkeypatch.setattr(
         services_module, "check_transaction_status", fake.check_transaction_status
     )
+    # LUD-21 verify preimage fetch (Phase 4) — live, never cached.
+    monkeypatch.setattr(
+        services_module, "get_standalone_payment", fake.get_standalone_payment
+    )
     # No real backoff in tests — single-attempt confirmation.
     monkeypatch.setattr(services_module, "_CONFIRMATION_RETRY_DELAYS_SECONDS", ())
     monkeypatch.setattr(views_module, "lnbits_create_invoice", fake.create_invoice)
@@ -352,3 +381,37 @@ async def mint_note(node: FakeNode, amount_msat: int = 50_000):
     node.settled.add(payment_hash)
     await _try_settle_mint(note_id, mint)
     return k1, note_id, mint
+
+
+async def mint_note_with_comment(node: FakeNode, amount_msat: int = 50_000):
+    """Mint a comment-protected settled note and return
+    ``(victim_secret, comment_hash, note_id, payment_hash, mint)``.
+
+    The WALLET generates a secret, computes ``comment_hash = sha256(secret)``,
+    and sends ``comment=comment_hash`` on /p/cb. The note materializes keyed
+    by ``comment_hash`` (not the payment preimage). The ``victim_secret`` is
+    what the wallet keeps and uses to redeem via /w (``k1=victim_secret`` →
+    ``note_id = sha256(victim_secret) = comment_hash``). This closes the
+    routing-node preimage race: a routing node that sees the preimage cannot
+    redeem the note because the note is keyed by the WALLET-supplied
+    comment hash, not the payment preimage.
+    """
+    mint = await get_mint_by_id(TEST_MINT_ID)
+    payment = await node.create_invoice(
+        wallet_id=mint.wallet, amount=amount_msat // 1000
+    )
+    payment_hash = payment.payment_hash
+    victim_secret, comment_hash = fresh_secret()
+    await record_mint_record(
+        payment_hash=payment_hash,
+        mint_id=mint.id,
+        pr=payment.bolt11,
+        amount_msat=amount_msat,
+        comment_hash=comment_hash,
+    )
+    node.settled.add(payment_hash)
+    # note_id is the comment_hash (not sha256(preimage)) — the note is
+    # keyed by the WALLET-supplied comment hash.
+    note_id = comment_hash
+    await _try_settle_mint(note_id, mint)
+    return victim_secret, comment_hash, note_id, payment_hash, mint
