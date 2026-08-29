@@ -50,6 +50,16 @@ const LNURLMINT_TEMPLATE = `
                 <q-item-section side>
                   <div class="row q-gutter-xs">
                     <q-btn
+                      outline
+                      dense
+                      color="primary"
+                      icon="open_in_new"
+                      label="Public Page"
+                      :href="'/lnurlmint/m/' + mint.id"
+                      type="a"
+                      @click.stop
+                    ></q-btn>
+                    <q-btn
                       flat
                       dense
                       color="primary"
@@ -105,8 +115,10 @@ const LNURLMINT_TEMPLATE = `
                         No notes.
                       </div>
                       <q-btn
-                        flat
+                        outline
                         dense
+                        color="primary"
+                        icon="refresh"
                         label="Refresh"
                         @click="fetchNotes(mint.id)"
                         class="q-mt-sm"
@@ -155,8 +167,10 @@ const LNURLMINT_TEMPLATE = `
                         No activity yet.
                       </div>
                       <q-btn
-                        flat
+                        outline
                         dense
+                        color="primary"
+                        icon="refresh"
                         label="Refresh"
                         @click="fetchActivity(mint.id)"
                         class="q-mt-sm"
