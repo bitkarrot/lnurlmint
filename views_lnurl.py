@@ -482,7 +482,9 @@ async def get_withdraw_callback(
     # is taken from the change side (not the amount) so a holder can't
     # dodge the fee by splitting into dust. Rejects zero-value change
     # (change < 1) and negative change after fee (change_before_fee <
-    # base_fee). Returns {"status":"OK"} (sig/sig2 deferred to Phase 5).
+    # base_fee). Returns {"status":"OK"} with sig/sig2 (recoverable
+    # ECDSA signatures over the new notes for LUD-25 offline
+    # verification), omitted when signing fails.
     if amount is not None:
         if not 0 < amount < total_msat:
             return {
@@ -501,16 +503,22 @@ async def get_withdraw_callback(
             return {"status": "ERROR", "reason": "pending"}
         except ValueError as exc:
             return {"status": "ERROR", "reason": str(exc)}
-        await sign_note(h, amount, mint)
-        await sign_note(h2, change_amount, mint)
+        sig = await sign_note(h, amount, mint)
+        sig2 = await sign_note(h2, change_amount, mint)
         logger.debug(f"lnurlmint: split for mint_id={mint_id}")
-        return {"status": "OK"}
+        resp: dict = {"status": "OK"}
+        if sig is not None:
+            resp["sig"] = sig
+        if sig2 is not None:
+            resp["sig2"] = sig2
+        return resp
 
     # --- Rotate/merge branch (pr is None, h is present, amount is None) ---
     # Rotate is merge with n=1 (refund=0, value-neutral). Merge refunds
     # (n-1)*base_fee_msat — every base fee collected beyond the single
     # one this now-one note should have cost. Returns {"status":"OK"}
-    # (sig deferred to Phase 5).
+    # with sig (recoverable ECDSA signature over the new note for
+    # LUD-25 offline verification), omitted when signing fails.
     refund = (len(note_ids) - 1) * mint.base_fee_msat
     merged_amount = total_msat + refund
 
@@ -521,6 +529,9 @@ async def get_withdraw_callback(
     except ValueError as exc:
         return {"status": "ERROR", "reason": str(exc)}
 
-    await sign_note(h, merged_amount, mint)
+    sig = await sign_note(h, merged_amount, mint)
     logger.debug(f"lnurlmint: rotate/merge for mint_id={mint_id}")
-    return {"status": "OK"}
+    resp: dict = {"status": "OK"}
+    if sig is not None:
+        resp["sig"] = sig
+    return resp
