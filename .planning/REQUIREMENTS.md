@@ -71,10 +71,10 @@ Requirements for initial release. Each maps to roadmap phases. Full LUD-25 behav
 
 ### Offline Verification
 
-- [ ] **SIGN-01**: Each mint has a secp256k1 keypair generated at creation and stored in `mints.mint_privkey` (Option B — portable across all LNbits backends)
-- [ ] **SIGN-02**: `GET /lnurlmint/w/{mint_id}` advertises `mintPubkey` (the mint's own public key, not the node's) when the mint has a keypair
-- [ ] **SIGN-03**: Rotate/split/merge responses carry `sig`/`sig2` — recoverable ECDSA signatures over `LNURLcash:<amount>:<note_id_hex>` using the mint's private key; signing failures are swallowed (never block a rotate/split/merge)
-- [ ] **SIGN-04**: `verify_note` (recoverable signature verification) is available for test-only use (using `coincurve` — transitive dep, confined to tests)
+- [x] **SIGN-01**: Each mint has a secp256k1 keypair generated at creation and stored in `mints.mint_privkey` (Option B — portable across all LNbits backends)
+- [x] **SIGN-02**: `GET /lnurlmint/w/{mint_id}` advertises `mintPubkey` (the mint's own public key, not the node's) when the mint has a keypair
+- [x] **SIGN-03**: Rotate/split/merge responses carry `sig`/`sig2` — recoverable ECDSA signatures over `LNURLcash:<amount>:<note_id_hex>` using the mint's private key; signing failures are swallowed (never block a rotate/split/merge)
+- [x] **SIGN-04**: `verify_note` (recoverable signature verification) is available for test-only use (using `coincurve` — transitive dep, confined to tests)
 
 ### Mint Economics
 
@@ -187,10 +187,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | COMM-01 | 4 | done |
 | COMM-02 | 4 | done |
 | COMM-03 | 4 | done |
-| SIGN-01 | 5 | pending |
-| SIGN-02 | 5 | pending |
-| SIGN-03 | 5 | pending |
-| SIGN-04 | 5 | pending |
+| SIGN-01 | 5 | done |
+| SIGN-02 | 5 | done |
+| SIGN-03 | 5 | done |
+| SIGN-04 | 5 | done |
 | ECON-01 | 2 | Complete |
 | ECON-02 | 2 | Complete |
 | ECON-03 | 2 | Complete |

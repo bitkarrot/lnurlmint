@@ -139,10 +139,11 @@ Phase 1 (Foundation)
 
 ---
 
-### Phase 5: Offline Verification
+### Phase 5: Offline Verification ✅
 
 **Goal:** Each mint signs rotate/split/merge notes with a per-mint secp256k1 keypair, advertising `mintPubkey` and returning `sig`/`sig2` so holders can verify notes offline without trusting the mint online.
 **Mode:** mvp
+**Status:** Completed (2026-08-29) — 4/4 requirements, 44/44 tests pass
 
 **Rationale:** Offline verification uses Option B (per-mint keypair) for portability across all LNbits backends (FakeWallet, VoidWallet, etc.). `mintPubkey` is the mint's own key, not the node's. `coincurve` is used for signing (transitive dep, already imported by LNbits' own `nwc.py`/`nostr.py`). Signing failures are swallowed (never block a rotate/split/merge). `verify_note` (coincurve recovery) is test-only. Depends on Phase 3 (rotate/split/merge must exist to sign).
 
