@@ -111,7 +111,7 @@ window.PageLnurlmint = {
       this.createDialog.loading = true
       try {
         const wallet = this.g.user.wallets[0]
-        await LNbits.api.request(
+        const response = await LNbits.api.request(
           'POST',
           '/lnurlmint/api/v1/mints',
           wallet.adminkey,
@@ -119,6 +119,7 @@ window.PageLnurlmint = {
         )
         this.createDialog.show = false
         this.fetchMints()
+        this.$q.notify({message: 'Mint created', color: 'positive'})
       } catch (error) {
         LNbits.utils.notifyApiError(error)
         this.errorMessage = 'Failed to create mint'
@@ -138,6 +139,7 @@ window.PageLnurlmint = {
         )
         this.editDialog.show = false
         this.fetchMints()
+        this.$q.notify({message: 'Mint updated', color: 'positive'})
       } catch (error) {
         LNbits.utils.notifyApiError(error)
         this.errorMessage = 'Failed to update mint'
@@ -154,6 +156,7 @@ window.PageLnurlmint = {
           wallet.adminkey
         )
         this.fetchMints()
+        this.$q.notify({message: 'Mint deleted', color: 'positive'})
       } catch (error) {
         if (error.response && error.response.status === 409) {
           this.errorMessage = 'Cannot delete mint with outstanding notes'
