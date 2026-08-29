@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from bech32 import bech32_encode, convertbits
 from fastapi import APIRouter, Depends, HTTPException, Request
+from loguru import logger
 
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
@@ -240,8 +241,9 @@ async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
                 ),
                 "addresses": public_info.addresses,
             }
-    except Exception:
-        pass  # Graceful degradation — node_info stays null.
+    except Exception as exc:
+        logger.debug(f"public mint info: node info unavailable: {exc}")
+        # Graceful degradation — node_info stays null.
 
     return {
         "username": mint.username,

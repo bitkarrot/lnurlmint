@@ -10,9 +10,13 @@ window.PageLnurlmintPublic = {
   },
   computed: {
     mintId() {
-      const parts = window.location.pathname.split('/')
-      // /lnurlmint/m/{mint_id} → last segment
-      return parts[parts.length - 1]
+      // Prefer Vue Router params (set by routes.json) when available
+      if (this.$route && this.$route.params && this.$route.params.mint_id) {
+        return this.$route.params.mint_id
+      }
+      // Fallback: extract from URL path (handles trailing slashes)
+      const match = window.location.pathname.match(/\/m\/([^/]+)/)
+      return match ? match[1] : ''
     },
     isOnion() {
       return window.location.hostname.endsWith('.onion')

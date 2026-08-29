@@ -733,28 +733,25 @@ async def get_mint_activity(
 ) -> list[dict]:
     """Return recent mint and melt records, wallet-scoped (SEC-07).
 
-    Merges mints_records and melts tables, sorted by created_at desc.
+    Merges mints_records and melts tables via UNION ALL, sorted by
+    created_at desc with a single LIMIT — so the most-recent records
+    across both tables are returned (not capped per-table).
     Each record is a dict with: type ('mint' or 'melt'), amount_msat,
     payment_hash, pr, settled (bool), created_at.
     """
-    mint_records = await db.fetchall(
-        "SELECT r.payment_hash, r.amount_msat, r.pr, r.minted, "
-        "r.created_at, 'mint' as type "
-        "FROM lnurlmint.mints_records r "
-        "JOIN lnurlmint.mints m ON r.mint_id = m.id "
-        "WHERE r.mint_id = :mid AND m.wallet = :wallet "
-        "ORDER BY r.created_at DESC LIMIT :limit",
+    return await db.fetchall(
+        "SELECT * FROM ("
+        "  SELECT r.payment_hash, r.amount_msat, r.pr, r.minted AS settled, "
+        "  r.created_at, 'mint' AS type "
+        "  FROM lnurlmint.mints_records r "
+        "  JOIN lnurlmint.mints m ON r.mint_id = m.id "
+        "  WHERE r.mint_id = :mid AND m.wallet = :wallet "
+        "  UNION ALL "
+        "  SELECT r.payment_hash, r.amount_msat, r.pr, r.settled, "
+        "  r.created_at, 'melt' AS type "
+        "  FROM lnurlmint.melts r "
+        "  JOIN lnurlmint.mints m ON r.mint_id = m.id "
+        "  WHERE r.mint_id = :mid AND m.wallet = :wallet "
+        ") ORDER BY created_at DESC LIMIT :limit",
         {"mid": mint_id, "wallet": wallet_id, "limit": limit},
     )
-    melt_records = await db.fetchall(
-        "SELECT r.payment_hash, r.amount_msat, r.pr, r.settled, "
-        "r.created_at, 'melt' as type "
-        "FROM lnurlmint.melts r "
-        "JOIN lnurlmint.mints m ON r.mint_id = m.id "
-        "WHERE r.mint_id = :mid AND m.wallet = :wallet "
-        "ORDER BY r.created_at DESC LIMIT :limit",
-        {"mid": mint_id, "wallet": wallet_id, "limit": limit},
-    )
-    activity = list(mint_records) + list(melt_records)
-    activity.sort(key=lambda r: r["created_at"], reverse=True)
-    return activity[:limit]
