@@ -1,15 +1,19 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from bech32 import bech32_encode, convertbits
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from lnbits.core.models import WalletTypeInfo
 from lnbits.decorators import require_admin_key, require_invoice_key
+from lnbits.wallets import get_funding_source
+from lnbits.wallets.base import Feature
 
 from .crud import (
     create_mint,
     delete_mint,
     get_mint,
+    get_mint_by_id,
     get_mints_by_wallet,
     get_outstanding_notes,
     get_mint_activity,
@@ -17,8 +21,11 @@ from .crud import (
     _generate_mint_privkey,
 )
 from .models import Mint, CreateMint, UpdateMint, MintResponse
+from .services import _public_base_url, max_mintable_msat
+from .signing import mint_pubkey
 
 lnurlmint_api_router = APIRouter(prefix="/api/v1/mints")
+lnurlmint_public_router = APIRouter(prefix="/api/v1/public")
 
 
 @lnurlmint_api_router.post("")
@@ -182,3 +189,67 @@ async def api_get_mint_activity(
         }
         for r in activity
     ]
+
+
+# ---------------------------------------------------------------------------
+# Public mint info (Phase 6 — unauthenticated one-pager data endpoint)
+# ---------------------------------------------------------------------------
+
+
+@lnurlmint_public_router.get("/{mint_id}")
+async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
+    """Public mint info for the one-pager (no authentication).
+
+    Returns mint metadata (username, limits, sunset, onion_url),
+    the LNURL of the payRequest (bech32-encoded, Tor-aware), the
+    mint's public signing key, and node info (if the funding source
+    implements the Node API). Returns 404 for unknown mint_id.
+
+    No sensitive data is exposed: no wallet_id, no mint_privkey,
+    no note secrets. The mint_pubkey is the mint's public signing
+    key (not a secret). Node info is already public on the LN graph.
+    """
+    mint = await get_mint_by_id(mint_id)
+    if mint is None:
+        raise HTTPException(status_code=404, detail="Mint not found")
+
+    base = _public_base_url(request, mint)
+    lnurl_url = f"{base}/lnurlmint/lnurlp/{mint_id}"
+    lnurl_data = convertbits(lnurl_url.encode(), 8, 5, True)
+    lnurl = bech32_encode("lnurl", lnurl_data).upper()
+
+    # Fetch node info if the funding source implements the Node API.
+    node_info = None
+    try:
+        funding_source = get_funding_source()
+        if (
+            funding_source.features
+            and Feature.nodemanager in funding_source.features
+            and funding_source.__node_cls__
+        ):
+            node = funding_source.__node_cls__(funding_source)
+            public_info = await node.get_public_info()
+            node_info = {
+                "id": public_info.id,
+                "alias": public_info.alias,
+                "color": public_info.color,
+                "num_peers": public_info.num_peers,
+                "capacity_msat": public_info.channel_stats.total_capacity,
+                "num_channels": sum(
+                    public_info.channel_stats.counts.values()
+                ),
+                "addresses": public_info.addresses,
+            }
+    except Exception:
+        pass  # Graceful degradation — node_info stays null.
+
+    return {
+        "username": mint.username,
+        "lnurl": lnurl,
+        "min_mint_msat": mint.min_mint_msat,
+        "max_mintable_msat": max_mintable_msat(mint),
+        "sunset_mint": mint.sunset_mint,
+        "onion_url": mint.onion_url,
+        "mint_pubkey": mint_pubkey(mint),
+        "node_info": node_info,
+    }

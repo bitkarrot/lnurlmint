@@ -5,12 +5,13 @@ from loguru import logger
 
 from .crud import db
 from .views import lnurlmint_generic_router
-from .views_api import lnurlmint_api_router
+from .views_api import lnurlmint_api_router, lnurlmint_public_router
 from .views_lnurl import lnurlmint_lnurl_router
 
 lnurlmint_ext: APIRouter = APIRouter(prefix="/lnurlmint", tags=["lnurlmint"])
 lnurlmint_ext.include_router(lnurlmint_generic_router)
 lnurlmint_ext.include_router(lnurlmint_api_router)
+lnurlmint_ext.include_router(lnurlmint_public_router)
 lnurlmint_ext.include_router(lnurlmint_lnurl_router)
 
 lnurlmint_static_files = [
