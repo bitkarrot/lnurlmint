@@ -114,10 +114,11 @@ Phase 1 (Foundation)
 
 ---
 
-### Phase 4: Comment Protection + Verify
+### Phase 4: Comment Protection + Verify ✅
 
 **Goal:** A mint can use LUD-25 comment protection (note keyed by WALLET-supplied comment hash, closing the routing-node preimage race), and the LUD-21 verify endpoint reports settlement status with a real off-switch and comment-protection gating.
 **Mode:** mvp
+**Status:** Completed (2026-08-29) — 8/8 requirements, 34/34 tests pass
 
 **Rationale:** Comment protection and verify are paired: verify is only safe when comment protection is in play (for no-comment mints, the preimage IS the bearer secret). The verify observer race PoC (`test_poc_verify_race.py`) locks both together. `VERIFY_ENABLED=false` must produce a real 404 (not just a hidden advertisement), because the preimage is a bearer secret and the URL shape is guessable.
 
