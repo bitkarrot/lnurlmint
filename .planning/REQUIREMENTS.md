@@ -86,15 +86,15 @@ Requirements for initial release. Each maps to roadmap phases. Full LUD-25 behav
 
 ### Tor
 
-- [ ] **TOR-01**: Per-mint `onion_url` field: when set, the public one-pager advertises it as an alternative address, and LNURL/callback URLs use it as the base instead of `base_url` for Tor visitors (prevents a fixed clearnet `base_url` leaking into a Tor visitor's QR code)
-- [ ] **TOR-02**: `public_base_url` derivation is Host-header-spoof-proof (built from per-mint `base_url` setting, not `req.url_for` which is Host-header-derived and spoofable via a plain Host header even behind a proxy)
+- [x] **TOR-01**: Per-mint `onion_url` field: when set, the public one-pager advertises it as an alternative address, and LNURL/callback URLs use it as the base instead of `base_url` for Tor visitors (prevents a fixed clearnet `base_url` leaking into a Tor visitor's QR code)
+- [x] **TOR-02**: `public_base_url` derivation is Host-header-spoof-proof (built from per-mint `base_url` setting, not `req.url_for` which is Host-header-derived and spoofable via a plain Host header even behind a proxy)
 
 ### Frontend
 
-- [ ] **UI-01**: Management SPA (Vue 3 + Quasar): wallet owner can create a new mint (set fees, limits, username, verify toggle, sunset, onion_url), view outstanding notes, see mint activity log
-- [ ] **UI-02**: Management SPA: wallet owner can update mint config (fees, limits, sunset, verify toggle) and delete a mint (only if no outstanding notes)
-- [ ] **UI-03**: Public one-pager (`/lnurlmint/{mint_id}`): shows mint QR code (LNURL of the payRequest), mint limits, node info (alias, color, capacity, channel/peer counts) with mempool.space/amboss.space links, Tor address if configured
-- [ ] **UI-04**: Public one-pager is served without authentication (index_public pattern); management SPA requires wallet auth (check_user_exists + require_admin_key/require_invoice_key)
+- [x] **UI-01**: Management SPA (Vue 3 + Quasar): wallet owner can create a new mint (set fees, limits, username, verify toggle, sunset, onion_url), view outstanding notes, see mint activity log
+- [x] **UI-02**: Management SPA: wallet owner can update mint config (fees, limits, sunset, verify toggle) and delete a mint (only if no outstanding notes)
+- [x] **UI-03**: Public one-pager (`/lnurlmint/{mint_id}`): shows mint QR code (LNURL of the payRequest), mint limits, node info (alias, color, capacity, channel/peer counts) with mempool.space/amboss.space links, Tor address if configured
+- [x] **UI-04**: Public one-pager is served without authentication (index_public pattern); management SPA requires wallet auth (check_user_exists + require_admin_key/require_invoice_key)
 
 ### Testing
 
@@ -196,12 +196,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ECON-03 | 2 | Complete |
 | ECON-04 | 2 | Complete |
 | ECON-05 | 3 | Complete |
-| TOR-01 | 6 | pending |
-| TOR-02 | 6 | pending |
-| UI-01 | 6 | pending |
-| UI-02 | 6 | pending |
-| UI-03 | 6 | pending |
-| UI-04 | 6 | pending |
+| TOR-01 | 6 | Complete |
+| TOR-02 | 6 | Complete |
+| UI-01 | 6 | Complete |
+| UI-02 | 6 | Complete |
+| UI-03 | 6 | Complete |
+| UI-04 | 6 | Complete |
 | TEST-01 | 2 | Complete |
 | TEST-02 | 2 | Complete |
 | TEST-03 | 2 | Complete |
