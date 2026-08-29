@@ -136,19 +136,26 @@ async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
     record = await get_pending_mint_record(note_id, mint.id)
     if record is None:
         return False
+    # Use record.payment_hash (NOT note_id) for settlement calls. For
+    # no-comment mints, record.payment_hash == note_id (no behavior
+    # change). For comment-protected mints (Phase 4), note_id is the
+    # WALLET-supplied comment_hash but the funding invoice is keyed by
+    # the payment_hash — check_transaction_status and settle_mint must
+    # use the payment_hash to find and settle the right invoice.
     # If the funding source is unreachable (connection error, timeout),
     # catch the exception and return False (settlement not confirmed,
     # try again later) instead of propagating a 500 to the /w or /w/cb
     # endpoint (W-03 — preserves the LNURL error format invariant).
     try:
-        status = await check_transaction_status(mint.wallet, note_id)
+        status = await check_transaction_status(mint.wallet, record.payment_hash)
     except Exception as exc:
         logger.warning(
-            f"settle_mint: check_transaction_status failed for {note_id}: {exc}"
+            f"settle_mint: check_transaction_status failed for "
+            f"{record.payment_hash}: {exc}"
         )
         return False
     if status.success:
-        net_amount = await settle_mint(note_id)
+        net_amount = await settle_mint(record.payment_hash)
         return net_amount is not None
     return False
 

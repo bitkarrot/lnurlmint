@@ -106,7 +106,9 @@ async def get_payrequest(mint_id: str, request: Request) -> dict:
 
 
 @lnurlmint_lnurl_router.get("/p/cb/{mint_id}")
-async def get_pay_callback(mint_id: str, request: Request, amount: int) -> dict:
+async def get_pay_callback(
+    mint_id: str, request: Request, amount: int, comment: Optional[str] = None
+) -> dict:
     """Mint callback — creates an invoice and records a pending mint.
 
     Public endpoint (no auth). Validates the amount against fee-aware
@@ -115,6 +117,17 @@ async def get_pay_callback(mint_id: str, request: Request, amount: int) -> dict:
     returns {pr, disposable: false}. The note is NOT materialized here
     — lazy settlement materializes it on the first /w poll after the
     invoice settles (MINT-03).
+
+    LUD-12 comment param (Phase 4): if `comment` is a bare hex-encoded
+    32-byte hash (64 hex chars), the resulting note is keyed by that
+    hash (comment protection, LUD-25) instead of the payment preimage —
+    closing the routing-node preimage race. A non-hex64 comment or no
+    comment falls back to the plain preimage-keyed note (never
+    rejected). The verify URL is advertised in the response only when
+    comment protection was used AND mint.verify_enabled is True (the
+    preimage is a bearer secret for no-comment mints — verify must not
+    leak it). A comment_hash collision raises ValueError, caught and
+    returned as an LNURL error.
     """
     mint = await get_mint_by_id(mint_id)
     if mint is None:
@@ -139,6 +152,12 @@ async def get_pay_callback(mint_id: str, request: Request, amount: int) -> dict:
             ),
         }
 
+    # LUD-25 comment protection: a bare hex64 hash keys the note by
+    # the WALLET-supplied comment hash (not the payment preimage),
+    # closing the routing-node preimage race. Anything else falls back
+    # to the plain preimage-keyed note (never rejected).
+    comment_hash = comment if comment is not None and HEX32_PATTERN.match(comment) else None
+
     payment = await lnbits_create_invoice(
         wallet_id=mint.wallet,
         amount=amount // 1000,  # msat → sat
@@ -148,15 +167,32 @@ async def get_pay_callback(mint_id: str, request: Request, amount: int) -> dict:
     pr = payment.bolt11
     payment_hash = payment.payment_hash
 
-    await record_mint_record(
-        payment_hash=payment_hash,
-        mint_id=mint.id,
-        pr=pr,
-        amount_msat=net_amount_msat,
-    )
+    try:
+        await record_mint_record(
+            payment_hash=payment_hash,
+            mint_id=mint.id,
+            pr=pr,
+            amount_msat=net_amount_msat,
+            comment_hash=comment_hash,
+        )
+    except ValueError as exc:
+        return {"status": "ERROR", "reason": str(exc)}
 
+    # Advertise the verify URL only when comment protection was used
+    # AND the mint has verify_enabled. For no-comment mints the
+    # preimage IS the bearer secret — verify must not be advertised
+    # (and the endpoint itself returns 404 for those payment hashes).
+    base = _public_base_url(request, mint)
+    verify = (
+        f"{base}/lnurlmint/verify/{mint_id}/{payment_hash}"
+        if mint.verify_enabled and comment_hash is not None
+        else None
+    )
     logger.debug(f"lnurlmint: recorded pending mint for mint_id={mint_id}")
-    return {"pr": pr, "disposable": False}
+    resp = {"pr": pr, "disposable": False}
+    if verify:
+        resp["verify"] = verify
+    return resp
 
 
 @lnurlmint_lnurl_router.get("/w/{mint_id}")

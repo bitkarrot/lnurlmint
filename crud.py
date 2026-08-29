@@ -194,17 +194,21 @@ async def get_note(note_id: str, mint_id: str) -> Optional[Note]:
 
 
 async def get_pending_mint_record(
-    payment_hash: str, mint_id: str
+    note_id: str, mint_id: str
 ) -> Optional[MintRecord]:
     """Return a pending (unminted) mint record, or None.
 
     Used by the lazy-settlement poll to check whether a mint invoice
-    is still awaiting note materialization.
+    is still awaiting note materialization. Matches on payment_hash OR
+    comment_hash so comment-protected mints (Phase 4) resolve correctly:
+    the /w endpoint passes sha256(k1) as note_id, which equals the
+    comment_hash for comment-protected mints (not the payment_hash).
     """
     return await db.fetchone(
         "SELECT * FROM lnurlmint.mints_records "
-        "WHERE payment_hash = :ph AND mint_id = :mid AND minted = 0",
-        {"ph": payment_hash, "mid": mint_id},
+        "WHERE (payment_hash = :nid OR comment_hash = :nid) "
+        "AND mint_id = :mid AND minted = 0",
+        {"nid": note_id, "mid": mint_id},
         MintRecord,
     )
 
@@ -233,6 +237,53 @@ async def melt_record_exists(payment_hash: str) -> bool:
         {"ph": payment_hash},
     )
     return row is not None
+
+
+async def mint_uses_comment(payment_hash: str) -> bool:
+    """Return True if the mint record used LUD-25 comment protection.
+
+    Used by the /verify endpoint (Phase 4) to gate whether the preimage
+    is safe to serve: a comment-protected mint keys the note by the
+    WALLET-supplied comment hash (not the payment preimage), so the
+    preimage is no longer the bearer secret and can be revealed. A
+    no-comment mint keys the note by the payment_hash (which is sha256
+    of the preimage) — the preimage IS the bearer secret and must not
+    be served.
+    """
+    row = await db.fetchone(
+        "SELECT comment_hash FROM lnurlmint.mints_records "
+        "WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return bool(row and row["comment_hash"] is not None)
+
+
+async def mint_pr(payment_hash: str) -> Optional[str]:
+    """Return the mint invoice string for a payment hash, or None.
+
+    Used by the /verify endpoint (Phase 4) to echo the original payment
+    request in the verify response so a wallet can re-display it.
+    """
+    row = await db.fetchone(
+        "SELECT pr FROM lnurlmint.mints_records WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return row["pr"] if row else None
+
+
+async def melt_pr(payment_hash: str) -> Optional[str]:
+    """Return the melt invoice string for a payment hash, or None.
+
+    Used by the /verify endpoint (Phase 4) to echo the original payment
+    request in the verify response. Melt preimages are harmless to
+    reveal (the melt direction burns notes; the preimage does not
+    unlock any bearer credential).
+    """
+    row = await db.fetchone(
+        "SELECT pr FROM lnurlmint.melts WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return row["pr"] if row else None
 
 
 async def get_mint_id_for_note(note_id: str) -> Optional[str]:
@@ -453,20 +504,58 @@ async def record_mint_record(
 
     INSERT OR IGNORE handles the edge case where the same payment_hash
     is submitted twice (the PRIMARY KEY constraint prevents duplicates).
-    Single-statement operation — no db.connect() block needed.
+
+    When comment_hash is not None (LUD-25 comment protection, Phase 4),
+    the collision check runs first inside a single db.connect() block:
+    a comment_hash that already exists as a note id OR another mint
+    record's comment_hash is rejected with ValueError("comment already
+    in use"). This prevents comment-hash squatting — an attacker
+    planting a record under a victim's future comment hash would shadow
+    that mint and brick settle_mint's INSERT forever. The check and
+    INSERT run in one transaction so a concurrent request cannot slip
+    a colliding row in between (REC-03).
     """
-    await db.execute(
-        "INSERT OR IGNORE INTO lnurlmint.mints_records "
-        "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
-        "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
-        {
-            "ph": payment_hash,
-            "mid": mint_id,
-            "pr": pr,
-            "amount": amount_msat,
-            "ch": comment_hash,
-        },
-    )
+    if comment_hash is None:
+        # No comment protection — payment_hash is the PRIMARY KEY, so
+        # INSERT OR IGNORE handles duplicates. Single-statement path.
+        await db.execute(
+            "INSERT OR IGNORE INTO lnurlmint.mints_records "
+            "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
+            "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
+            {
+                "ph": payment_hash,
+                "mid": mint_id,
+                "pr": pr,
+                "amount": amount_msat,
+                "ch": comment_hash,
+            },
+        )
+        return
+
+    # Comment-protected mint — collision check + INSERT in one
+    # transaction so a concurrent request cannot slip a colliding row
+    # in between (REC-03).
+    async with db.connect() as conn:
+        collision = await conn.fetchone(
+            "SELECT 1 FROM lnurlmint.notes WHERE id = :ch "
+            "UNION SELECT 1 FROM lnurlmint.mints_records "
+            "WHERE comment_hash = :ch",
+            {"ch": comment_hash},
+        )
+        if collision is not None:
+            raise ValueError("comment already in use")
+        await conn.execute(
+            "INSERT OR IGNORE INTO lnurlmint.mints_records "
+            "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
+            "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
+            {
+                "ph": payment_hash,
+                "mid": mint_id,
+                "pr": pr,
+                "amount": amount_msat,
+                "ch": comment_hash,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
