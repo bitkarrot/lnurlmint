@@ -53,7 +53,7 @@ from lnurlmint.crud import (
     get_mint_by_id,
     record_mint_record,
 )
-from lnurlmint.migrations import m001_initial, m002_notes_records_melts
+from lnurlmint.migrations import m001_initial, m002_notes_records_melts, m003_comment_hash_unique
 from lnurlmint.models import Mint
 from lnurlmint.services import _try_settle_mint, _in_flight_melts
 
@@ -334,6 +334,7 @@ async def _reset_db() -> None:
     await db.execute("DROP TABLE IF EXISTS lnurlmint.mints")
     await m001_initial(db)
     await m002_notes_records_melts(db)
+    await m003_comment_hash_unique(db)
 
 
 @pytest.fixture

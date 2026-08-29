@@ -224,7 +224,7 @@ async def verify_invoice(mint_id: str, payment_hash: str) -> JSONResponse:
         )
     result = await _verify_mint(payment_hash, mint)
     if result is None:
-        result = await _verify_melt(payment_hash)
+        result = await _verify_melt(payment_hash, mint)
     if result is None:
         return JSONResponse(
             status_code=404,

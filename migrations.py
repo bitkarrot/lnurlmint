@@ -142,3 +142,29 @@ async def m002_notes_records_melts(db):
         CREATE INDEX IF NOT EXISTS idx_lnurlmint_melts_mint_id ON {melts}(mint_id);
         """
     )
+
+
+async def m003_comment_hash_unique(db):
+    """Add a UNIQUE index on mints_records.comment_hash (Phase 4).
+
+    A UNIQUE constraint on comment_hash prevents two concurrent
+    record_mint_record calls from both passing the collision SELECT and
+    inserting the same comment_hash — which would brick one of the mints
+    (settle_mint's INSERT into notes would PK-collide with the other's
+    note). SQLite and Postgres both allow multiple NULLs in a UNIQUE
+    index, so no-comment mints (comment_hash=NULL) are unaffected.
+
+    The collision check in record_mint_record also checks
+    mints_records.payment_hash (the PK) and notes.id, but the UNIQUE
+    index is the last line of defense against a TOCTOU race between the
+    SELECT and INSERT under db.connect() (which is a process-level lock,
+    not a DB transaction — LNbits' Connection.execute auto-commits per
+    statement).
+    """
+    mints_records = f"{db.references_schema}mints_records"
+    await db.execute(
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lnurlmint_mints_records_comment_hash
+        ON {mints_records}(comment_hash);
+        """
+    )

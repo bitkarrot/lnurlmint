@@ -207,33 +207,36 @@ async def _verify_mint(payment_hash: str, mint: Mint) -> Optional[dict]:
     """Verify response for a mint direction, or None if not a mint /
     refused (no-comment). Per spec, SERVICE MUST NOT offer verify for a
     no-comment mint's payment_hash — there the preimage IS the bearer
-    secret. Comment-protected mints serve normally.
+    secret. Comment-protected mints serve normally. All lookups are
+    scoped by mint.id so a verify call on mint A cannot resolve a
+    payment_hash belonging to mint B (W-01).
 
     Returns a dict suitable for LnurlPayVerifyResponse(**result):
     {"settled": bool, "preimage": str|None, "pr": str}.
     """
-    pr = await mint_pr(payment_hash)
+    pr = await mint_pr(payment_hash, mint.id)
     if pr is None:
-        return None  # not a mint payment_hash
-    if not await mint_uses_comment(payment_hash):
+        return None  # not a mint payment_hash for this mint
+    if not await mint_uses_comment(payment_hash, mint.id):
         return None  # refused — preimage is the bearer secret
-    settled = await mint_settled(payment_hash)
+    settled = await mint_settled(payment_hash, mint.id)
     preimage = await _mint_preimage(payment_hash) if settled else None
     return {"settled": settled, "preimage": preimage, "pr": pr}
 
 
-async def _verify_melt(payment_hash: str) -> Optional[dict]:
+async def _verify_melt(payment_hash: str, mint: Mint) -> Optional[dict]:
     """Verify response for a melt direction, or None if not a melt.
     Served unconditionally — the melt preimage is harmless (notes that
-    funded it are already burned by the time it appears).
+    funded it are already burned by the time it appears). All lookups
+    are scoped by mint.id (W-01).
 
     Returns a dict suitable for LnurlPayVerifyResponse(**result):
     {"settled": bool, "preimage": str|None, "pr": str}.
     """
-    pr = await melt_pr(payment_hash)
+    pr = await melt_pr(payment_hash, mint.id)
     if pr is None:
-        return None  # not a melt payment_hash
-    settled = await melt_settled(payment_hash)
+        return None  # not a melt payment_hash for this mint
+    settled = await melt_settled(payment_hash, mint.id)
     preimage = await _melt_preimage(payment_hash) if settled else None
     return {"settled": settled, "preimage": preimage, "pr": pr}
 
