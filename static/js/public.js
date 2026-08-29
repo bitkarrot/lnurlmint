@@ -53,10 +53,10 @@ const LNURLMINT_PUBLIC_TEMPLATE = `
               class="q-mt-sm"
               input-class="text-caption"
             />
-            <q-banner class="bg-grey-2 q-mt-md text-body2" rounded>
-              <q-icon name="info" class="q-mr-sm" color="primary" />
+            <q-banner class="bg-primary text-white q-mt-md text-body2" rounded>
+              <q-icon name="info" class="q-mr-sm" color="white" />
               After paying, redeem your bearer note at
-              <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
+              <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener" style="color: white; font-weight: bold;">wallet.lnurlcash.com</a>
               &mdash; enter the LNURL above and the payment preimage.
             </q-banner>
           </div>
