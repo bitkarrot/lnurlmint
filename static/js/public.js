@@ -49,7 +49,6 @@ const LNURLMINT_PUBLIC_TEMPLATE = `
               filled
               readonly
               :model-value="mint.lnurl"
-              type="textarea"
               class="q-mt-sm"
               input-class="text-caption"
             />
@@ -80,7 +79,6 @@ const LNURLMINT_PUBLIC_TEMPLATE = `
             filled
             readonly
             v-model="mint.mint_pubkey"
-            type="textarea"
             class="q-mb-md"
             input-class="text-caption"
           />
