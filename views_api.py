@@ -11,6 +11,8 @@ from .crud import (
     delete_mint,
     get_mint,
     get_mints_by_wallet,
+    get_outstanding_notes,
+    get_mint_activity,
     update_mint,
     _generate_mint_privkey,
 )
@@ -125,3 +127,58 @@ async def api_delete_mint(
             detail="Cannot delete mint with outstanding notes",
         )
     return {"success": True}
+
+
+@lnurlmint_api_router.get("/{mint_id}/notes")
+async def api_get_mint_notes(
+    mint_id: str,
+    wallet: WalletTypeInfo = Depends(require_invoice_key),
+) -> list:
+    """List outstanding notes for a mint (invoice key, wallet-scoped).
+
+    Returns 404 if the mint does not exist or belongs to another
+    wallet. Notes include id, amount_msat, spent, pending, and
+    created_at.
+    """
+    mint = await get_mint(mint_id, wallet.wallet.id)
+    if mint is None:
+        raise HTTPException(status_code=404, detail="Mint not found")
+    notes = await get_outstanding_notes(mint_id, wallet.wallet.id)
+    return [
+        {
+            "id": n.id,
+            "amount_msat": n.amount_msat,
+            "spent": n.spent,
+            "pending": n.pending,
+            "created_at": n.created_at.isoformat() if n.created_at else None,
+        }
+        for n in notes
+    ]
+
+
+@lnurlmint_api_router.get("/{mint_id}/activity")
+async def api_get_mint_activity(
+    mint_id: str,
+    wallet: WalletTypeInfo = Depends(require_invoice_key),
+) -> list:
+    """Recent mint/melt activity for a mint (invoice key, wallet-scoped).
+
+    Returns 404 if the mint does not exist or belongs to another
+    wallet. Activity records include type, amount_msat, payment_hash,
+    pr, settled/minted, and created_at.
+    """
+    mint = await get_mint(mint_id, wallet.wallet.id)
+    if mint is None:
+        raise HTTPException(status_code=404, detail="Mint not found")
+    activity = await get_mint_activity(mint_id, wallet.wallet.id)
+    return [
+        {
+            "type": r["type"],
+            "amount_msat": r["amount_msat"],
+            "payment_hash": r["payment_hash"],
+            "pr": r["pr"],
+            "settled": bool(r.get("settled") or r.get("minted")),
+            "created_at": str(r["created_at"]),
+        }
+        for r in activity
+    ]

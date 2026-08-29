@@ -705,3 +705,56 @@ async def swap(
                 "VALUES (:id, :mint_id, :amount, 0, 0)",
                 {"id": note_id, "mint_id": mint_id, "amount": amount_msat},
             )
+
+
+# ---------------------------------------------------------------------------
+# Management SPA queries (Phase 6 — outstanding notes + activity log)
+# ---------------------------------------------------------------------------
+
+
+async def get_outstanding_notes(mint_id: str, wallet_id: str) -> list[Note]:
+    """Return all notes for a mint, wallet-scoped via JOIN (SEC-07).
+
+    Ordered by created_at descending. Used by the management SPA's
+    outstanding notes view.
+    """
+    return await db.fetchall(
+        "SELECT n.* FROM lnurlmint.notes n "
+        "JOIN lnurlmint.mints m ON n.mint_id = m.id "
+        "WHERE n.mint_id = :mid AND m.wallet = :wallet "
+        "ORDER BY n.created_at DESC",
+        {"mid": mint_id, "wallet": wallet_id},
+        Note,
+    )
+
+
+async def get_mint_activity(
+    mint_id: str, wallet_id: str, limit: int = 20
+) -> list[dict]:
+    """Return recent mint and melt records, wallet-scoped (SEC-07).
+
+    Merges mints_records and melts tables, sorted by created_at desc.
+    Each record is a dict with: type ('mint' or 'melt'), amount_msat,
+    payment_hash, pr, settled (bool), created_at.
+    """
+    mint_records = await db.fetchall(
+        "SELECT r.payment_hash, r.amount_msat, r.pr, r.minted, "
+        "r.created_at, 'mint' as type "
+        "FROM lnurlmint.mints_records r "
+        "JOIN lnurlmint.mints m ON r.mint_id = m.id "
+        "WHERE r.mint_id = :mid AND m.wallet = :wallet "
+        "ORDER BY r.created_at DESC LIMIT :limit",
+        {"mid": mint_id, "wallet": wallet_id, "limit": limit},
+    )
+    melt_records = await db.fetchall(
+        "SELECT r.payment_hash, r.amount_msat, r.pr, r.settled, "
+        "r.created_at, 'melt' as type "
+        "FROM lnurlmint.melts r "
+        "JOIN lnurlmint.mints m ON r.mint_id = m.id "
+        "WHERE r.mint_id = :mid AND m.wallet = :wallet "
+        "ORDER BY r.created_at DESC LIMIT :limit",
+        {"mid": mint_id, "wallet": wallet_id, "limit": limit},
+    )
+    activity = list(mint_records) + list(melt_records)
+    activity.sort(key=lambda r: r["created_at"], reverse=True)
+    return activity[:limit]
