@@ -447,8 +447,25 @@ async def get_withdraw_callback(
                 await _track_melt_end(decoded.payment_hash)
             raise
 
+        # LUD-25 melt verify: the melt invoice's pr and verify URL are
+        # advertised in the response when verify_enabled is on (the melt
+        # preimage is harmless — notes that funded the melt are already
+        # burned by the time it appears). Recorded unconditionally above
+        # so /verify can serve it while on; the setting also gates whether
+        # it's advertised here.
+        melt_verify_url = None
+        if mint.verify_enabled and decoded.has_payment_hash:
+            base = _public_base_url(request, mint)
+            melt_verify_url = (
+                f"{base}/lnurlmint/verify/{mint_id}/{decoded.payment_hash}"
+            )
+
         logger.debug(f"lnurlmint: scheduled melt for mint_id={mint_id}")
-        return {"status": "OK"}
+        resp: dict = {"status": "OK"}
+        if melt_verify_url is not None:
+            resp["pr"] = pr
+            resp["verify"] = melt_verify_url
+        return resp
 
     # --- Shared k1 resolution (split + rotate/merge) ---
     # Resolve all k1 → note_ids + values (with lazy settlement via

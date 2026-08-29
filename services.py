@@ -241,6 +241,11 @@ async def _verify_mint(payment_hash: str, mint: Mint) -> Optional[dict]:
         return None  # not a mint payment_hash for this mint
     if not await mint_uses_comment(payment_hash, mint.id):
         return None  # refused — preimage is the bearer secret
+    # Lazy settlement: if the note hasn't materialized yet, check the
+    # funding source live and settle on first observation (mirrors the
+    # source's _mint_settled, which verify calls to keep reporting True
+    # forever once settled, even if no /w poll ever triggered it).
+    await _try_settle_mint(payment_hash, mint)
     settled = await mint_settled(payment_hash, mint.id)
     preimage = await _mint_preimage(payment_hash) if settled else None
     return {"settled": settled, "preimage": preimage, "pr": pr}

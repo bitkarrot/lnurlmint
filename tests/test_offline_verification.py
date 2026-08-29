@@ -111,7 +111,9 @@ async def test_melt_carries_no_signature(node, db_setup):
     data = await get_withdraw_callback(
         TEST_MINT_ID, _mock_request(), BackgroundTasks(), k1=[k1], pr=pr
     )
-    assert data == {"status": "OK"}, data
+    assert data["status"] == "OK", data
+    # melt carries no signature (only rotate/split do)
+    assert "sig" not in data
 
 
 # ---------------------------------------------------------------------------
