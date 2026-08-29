@@ -9,6 +9,7 @@ function here logs a spendable credential or full request URL (SEC-05).
 
 import asyncio
 from typing import Optional
+from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -118,11 +119,31 @@ def _melt_fee_limit_msat(amount_msat: int, mint: Mint) -> int:
 def _public_base_url(request, mint: Mint) -> str:
     """Derive the public base URL for callback/withdrawLink URLs.
 
-    If the mint has a per-mint `base_url` set (non-empty), it takes
-    priority — this is the Host-header-spoof-proof path. Otherwise fall
-    back to the request's base_url. Tor-aware onion substitution is
-    Phase 6; for now, per-mint base_url is the override mechanism.
+    Spoof-proof: the base is built from the operator's per-mint
+    `base_url` / `onion_url` settings, never from a raw request Host
+    header. An attacker cannot make the server use an arbitrary base
+    URL by sending a spoofed Host — the match is against the
+    operator's own configured `onion_url`.
+
+    Tor onion substitution (TOR-01): if `mint.onion_url` is set and
+    the request's Host matches the onion hostname, the onion URL is
+    used as the base. This prevents a fixed clearnet `base_url` from
+    leaking into a Tor visitor's QR code (the callback would point
+    at a host Tor can't reach). The match is against the operator's
+    own `onion_url` — the only way to trigger this branch is to
+    actually connect via the onion service.
+
+    X-Forwarded-Host: behind a reverse proxy, the operator must
+    configure uvicorn with `--proxy-headers` so that
+    `request.base_url` reflects the original Host (or
+    X-Forwarded-Host). No custom X-Forwarded-Host parsing is done
+    here — it relies on Starlette/uvicorn's built-in handling.
     """
+    if mint.onion_url:
+        request_host = urlparse(str(request.base_url)).hostname or ""
+        onion_host = urlparse(mint.onion_url).hostname or ""
+        if request_host and request_host == onion_host:
+            return mint.onion_url.rstrip("/")
     if mint.base_url:
         return mint.base_url.rstrip("/")
     return str(request.base_url).rstrip("/")
