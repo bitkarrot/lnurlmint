@@ -12,6 +12,7 @@ from typing import Optional
 
 from loguru import logger
 
+from lnbits.core.crud.payments import get_standalone_payment
 from lnbits.core.models.payments import PaymentState
 from lnbits.core.services.payments import (
     check_transaction_status,
@@ -26,6 +27,11 @@ from .crud import (
     get_mint_id_for_note,
     get_pending_mint_record,
     mark_melt_settled,
+    melt_pr,
+    melt_settled,
+    mint_pr,
+    mint_settled,
+    mint_uses_comment,
     pending_melts,
     restore,
     settle_mint,
@@ -158,6 +164,78 @@ async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
         net_amount = await settle_mint(record.payment_hash)
         return net_amount is not None
     return False
+
+
+# ---------------------------------------------------------------------------
+# LUD-21 verify helpers (Phase 4)
+#
+# _mint_preimage / _melt_preimage fetch the hex preimage live from LNbits
+# on every call (never cached — SEC-02). _verify_mint gates on
+# comment protection: a no-comment mint's preimage IS the bearer secret
+# and must not be served (returns None → 404). _verify_melt serves
+# unconditionally — the melt preimage is harmless (notes are already
+# burned by the time it appears). No preimage or payment_hash is logged
+# (SEC-05).
+# ---------------------------------------------------------------------------
+
+
+async def _mint_preimage(payment_hash: str) -> Optional[str]:
+    """Hex-encoded preimage of a settled mint invoice, fetched live from
+    LNbits for LUD-21 verify — never cached (SEC-02). Returns None if
+    the payment is not found or the lookup fails.
+    """
+    try:
+        payment = await get_standalone_payment(payment_hash, incoming=True)
+    except Exception:
+        return None
+    return payment.preimage if payment else None
+
+
+async def _melt_preimage(payment_hash: str) -> Optional[str]:
+    """Hex-encoded preimage of a settled outgoing melt payment, fetched
+    live from LNbits for LUD-25 melt verify. Returns None if the payment
+    is not found or the lookup fails.
+    """
+    try:
+        payment = await get_standalone_payment(payment_hash)
+    except Exception:
+        return None
+    return payment.preimage if payment else None
+
+
+async def _verify_mint(payment_hash: str, mint: Mint) -> Optional[dict]:
+    """Verify response for a mint direction, or None if not a mint /
+    refused (no-comment). Per spec, SERVICE MUST NOT offer verify for a
+    no-comment mint's payment_hash — there the preimage IS the bearer
+    secret. Comment-protected mints serve normally.
+
+    Returns a dict suitable for LnurlPayVerifyResponse(**result):
+    {"settled": bool, "preimage": str|None, "pr": str}.
+    """
+    pr = await mint_pr(payment_hash)
+    if pr is None:
+        return None  # not a mint payment_hash
+    if not await mint_uses_comment(payment_hash):
+        return None  # refused — preimage is the bearer secret
+    settled = await mint_settled(payment_hash)
+    preimage = await _mint_preimage(payment_hash) if settled else None
+    return {"settled": settled, "preimage": preimage, "pr": pr}
+
+
+async def _verify_melt(payment_hash: str) -> Optional[dict]:
+    """Verify response for a melt direction, or None if not a melt.
+    Served unconditionally — the melt preimage is harmless (notes that
+    funded it are already burned by the time it appears).
+
+    Returns a dict suitable for LnurlPayVerifyResponse(**result):
+    {"settled": bool, "preimage": str|None, "pr": str}.
+    """
+    pr = await melt_pr(payment_hash)
+    if pr is None:
+        return None  # not a melt payment_hash
+    settled = await melt_settled(payment_hash)
+    preimage = await _melt_preimage(payment_hash) if settled else None
+    return {"settled": settled, "preimage": preimage, "pr": pr}
 
 
 # ---------------------------------------------------------------------------

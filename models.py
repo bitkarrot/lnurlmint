@@ -253,6 +253,28 @@ class LnurlPayActionResponse(BaseModel):
     verify: Optional[str] = None
 
 
+class LnurlPayVerifyResponse(BaseModel):
+    """LUD-21 verify response — settlement status for a mint or melt invoice.
+
+    Returned by GET /lnurlmint/verify/{mint_id}/{payment_hash}. `settled`
+    reports whether the invoice/payment has settled. `preimage` is the
+    hex-encoded preimage, fetched live from the funding source (never
+    cached — SEC-02), included only when settled and the preimage is
+    available. For a no-comment mint, `preimage` IS the bearer note's
+    spend secret — verify refuses to serve it (404) for those mints. For
+    a comment-protected mint, the preimage redeems nothing (the
+    WALLET-held secret behind `comment` is the note's key), so it's
+    served safely. For a melt, the preimage is the outgoing payment's
+    proof — harmless (the notes that funded it are already burned). `pr`
+    is the BOLT-11 invoice.
+    """
+
+    status: Literal["OK"] = "OK"
+    settled: bool
+    preimage: Optional[str] = None
+    pr: str
+
+
 class LnurlWithdrawResponse(BaseModel):
     """LUD-03 withdrawRequest response — advertises the melt/redeem flow.
 

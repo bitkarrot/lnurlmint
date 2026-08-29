@@ -286,6 +286,32 @@ async def melt_pr(payment_hash: str) -> Optional[str]:
     return row["pr"] if row else None
 
 
+async def mint_settled(payment_hash: str) -> bool:
+    """Whether a mint invoice has ever settled (minted flag is 1).
+
+    Used by LUD-21 verify, which must keep reporting True forever once
+    settled, even after the resulting note is later spent.
+    """
+    row = await db.fetchone(
+        "SELECT minted FROM lnurlmint.mints_records WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return bool(row and row["minted"])
+
+
+async def melt_settled(payment_hash: str) -> bool:
+    """Whether a melt's outgoing payment has been confirmed settled.
+
+    The `settled` flag is set by mark_melt_settled after positive
+    settlement confirmation. Used by LUD-21 verify.
+    """
+    row = await db.fetchone(
+        "SELECT settled FROM lnurlmint.melts WHERE payment_hash = :ph",
+        {"ph": payment_hash},
+    )
+    return bool(row and row["settled"])
+
+
 async def get_mint_id_for_note(note_id: str) -> Optional[str]:
     """Return the mint_id that owns a note, or None.
 

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 import bolt11
 from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from lnbits.core.services.payments import create_invoice as lnbits_create_invoice
@@ -34,6 +35,7 @@ from .crud import (
     record_mint_record,
     swap,
 )
+from .models import LnurlPayVerifyResponse
 from .services import (
     _melt_pay,
     _mint_fee_msat,
@@ -42,6 +44,8 @@ from .services import (
     _track_melt_end,
     _track_melt_start,
     _try_settle_mint,
+    _verify_melt,
+    _verify_mint,
     sign_note,
 )
 
@@ -193,6 +197,40 @@ async def get_pay_callback(
     if verify:
         resp["verify"] = verify
     return resp
+
+
+@lnurlmint_lnurl_router.get("/verify/{mint_id}/{payment_hash}")
+async def verify_invoice(mint_id: str, payment_hash: str) -> JSONResponse:
+    """LUD-21 verify — settlement status for a mint or melt invoice.
+
+    Public endpoint (no auth). Reports whether an invoice this mint
+    issued (via /p/cb) or paid out (a melt via /w/cb) has settled,
+    keyed by payment_hash. Served only while mint.verify_enabled is
+    on: false here disables the endpoint entirely (404), not just its
+    advertisement — the preimage is a bearer secret for no-comment
+    mints, so an operator who doesn't want it served needs a real off
+    switch. For no-comment mints, verify refuses to serve the preimage
+    (it IS the note's spend secret). For comment-protected mints and
+    melts, the preimage is harmless and served normally, fetched live
+    from the funding source (never cached — SEC-02).
+
+    No logger call includes payment_hash or preimage (SEC-05).
+    """
+    mint = await get_mint_by_id(mint_id)
+    if mint is None or not mint.verify_enabled:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "ERROR", "reason": "Not found"},
+        )
+    result = await _verify_mint(payment_hash, mint)
+    if result is None:
+        result = await _verify_melt(payment_hash)
+    if result is None:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "ERROR", "reason": "Not found"},
+        )
+    return LnurlPayVerifyResponse(**result)
 
 
 @lnurlmint_lnurl_router.get("/w/{mint_id}")
