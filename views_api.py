@@ -245,15 +245,9 @@ async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
         logger.debug(f"public mint info: node info unavailable: {exc}")
         # Graceful degradation — node_info stays null.
 
-    # Lightning address: username@host (from the public base URL)
-    from urllib.parse import urlparse
-    host = urlparse(base).hostname or ""
-    lightning_address = f"{mint.username}@{host}" if host else ""
-
     return {
         "username": mint.username,
         "lnurl": lnurl,
-        "lightning_address": lightning_address,
         "min_mint_msat": mint.min_mint_msat,
         "max_mintable_msat": max_mintable_msat(mint),
         "sunset_mint": mint.sunset_mint,

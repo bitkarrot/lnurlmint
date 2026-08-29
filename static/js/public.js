@@ -44,15 +44,6 @@ const LNURLMINT_PUBLIC_TEMPLATE = `
                 :label="copied ? 'Copied!' : 'Copy LNURL'"
                 @click="copyLnurl"
               />
-              <q-btn
-                v-if="mint.lightning_address"
-                outline
-                dense
-                color="primary"
-                :icon="copiedAddr ? 'check' : 'content_copy'"
-                :label="copiedAddr ? 'Copied!' : 'Copy Address'"
-                @click="copyAddress"
-              />
             </div>
             <q-input
               filled
@@ -62,20 +53,11 @@ const LNURLMINT_PUBLIC_TEMPLATE = `
               class="q-mt-sm"
               input-class="text-caption"
             />
-            <div v-if="mint.lightning_address" class="text-center q-mt-sm">
-              <q-chip
-                outline
-                color="primary"
-                icon="bolt"
-                :label="mint.lightning_address"
-              />
-            </div>
             <q-banner class="bg-grey-2 q-mt-md text-body2" rounded>
               <q-icon name="info" class="q-mr-sm" color="primary" />
               After paying, redeem your bearer note at
               <a href="https://wallet.lnurlcash.com" target="_blank" rel="noopener">wallet.lnurlcash.com</a>
-              &mdash; enter the mint's lightning address
-              (<code>{{ mint.lightning_address }}</code>) or LNURL and the payment preimage.
+              &mdash; enter the LNURL above and the payment preimage.
             </q-banner>
           </div>
 
@@ -212,8 +194,7 @@ window.PageLnurlmintPublic = {
       mint: null,
       loading: true,
       notFound: false,
-      copied: false,
-      copiedAddr: false
+      copied: false
     }
   },
   computed: {
@@ -270,19 +251,6 @@ window.PageLnurlmintPublic = {
           this.copied = false
         }, 2000)
         this.$q.notify({ type: 'positive', message: 'LNURL copied!' })
-      } catch (e) {
-        this.$q.notify({ type: 'negative', message: 'Failed to copy.' })
-      }
-    },
-    async copyAddress() {
-      if (!this.mint || !this.mint.lightning_address) return
-      try {
-        await navigator.clipboard.writeText(this.mint.lightning_address)
-        this.copiedAddr = true
-        setTimeout(() => {
-          this.copiedAddr = false
-        }, 2000)
-        this.$q.notify({ type: 'positive', message: 'Lightning address copied!' })
       } catch (e) {
         this.$q.notify({ type: 'negative', message: 'Failed to copy.' })
       }
