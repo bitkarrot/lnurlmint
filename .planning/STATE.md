@@ -2,21 +2,21 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 3 — Rotate + Split + Merge + Sunset
-status: Phase 3 complete (all 3 plans done)
-last_updated: "2026-08-28T22:17:00.000Z"
+current_phase: 4 — Comment Protection + Verify
+status: Ready to plan
+last_updated: "2026-08-28T22:29:14.208Z"
 progress:
   total_phases: 7
   completed_phases: 3
-  total_plans: 8
+  total_plans: 11
   completed_plans: 11
-  percent: 39
+  percent: 43
 ---
 
 # State: lnurlmint
 
 **Project:** lnurlmint — LNbits extension implementing LUD-25 lnurlcash (Lightning bearer assets), ported from standalone `lnurl-mint` FastAPI app
-**Current Phase:** 3 — Rotate + Split + Merge + Sunset
+**Current Phase:** 4 — Comment Protection + Verify
 **Project Reference:** `.planning/ROADMAP.md`
 **Mode:** mvp
 **Started:** 2026-08-28
