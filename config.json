@@ -4,9 +4,14 @@
   "tile": "/lnurlmint/static/image/lnurlmint.png",
   "contributors": [
     {
+      "name": "bitkarrot",
+      "uri": "https://github.com/bitkarrot",
+      "role": "Lead dev"
+    },
+    {
       "name": "dni",
       "uri": "https://github.com/dni",
-      "role": "Lead dev"
+      "role": "Original concept creator"
     }
   ],
   "version": "0.1.1",
