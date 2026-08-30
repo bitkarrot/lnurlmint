@@ -6,9 +6,23 @@ calls reconcile every 60 seconds — LNbits' task wrapper crash-restarts
 the coroutine if it raises, so reconcile is self-healing.
 """
 
-from lnbits.tasks import run_interval
+import asyncio
+from collections.abc import Callable, Coroutine
+
+from lnbits.settings import settings
 
 from .services import reconcile_pending_melts
+
+
+def run_interval(
+    seconds: int, func: Callable[[], Coroutine[None, None, None]]
+) -> Callable[[], Coroutine[None, None, None]]:
+    async def wrapper() -> None:
+        while settings.lnbits_running:
+            await func()
+            await asyncio.sleep(seconds)
+
+    return wrapper
 
 
 async def wait_for_melt_reconcile() -> None:

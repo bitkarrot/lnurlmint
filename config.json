@@ -9,7 +9,7 @@
       "role": "Lead dev"
     }
   ],
-  "version": "0.1.0",
+  "version": "0.1.1",
   "min_lnbits_version": "1.5.4",
   "license": "MIT"
 }
