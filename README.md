@@ -1,8 +1,6 @@
 # lnurlmint
 
-<p align="center">
-  <img src="static/image/lnurlmint.png" alt="lnurlmint icon" width="160">
-</p>
+  <img src="static/image/lnurlmint.png" alt="lnurlmint icon" align="right" width="160">
 
 An [LNbits](https://github.com/lnbits/lnbits) extension that implements **lnurlcash** ([LUD-25](https://github.com/lnurlw/LUDs/blob/luds/25.md)) — Lightning bearer assets on top of [LUD-03](https://github.com/lnurlw/LUDs/blob/luds/03.md) `withdrawRequest` and [LUD-06](https://github.com/lnurlw/LUDs/blob/luds/06.md) `payRequest`. A port of the standalone [`lnurl-mint`](https://github.com/dni/lnurl-mint) FastAPI app into the LNbits extension model.
 
