@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-09-29T18:49:44Z",
+  "phase": "upstream-sync",
+  "phase_name": "Port lnurlcash/lnurl-mint v0.12.0 features into LNbits extension",
+  "phase_dir": ".planning",
+  "plan": 0,
+  "task": 0,
+  "total_tasks": 0,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": 1, "name": "Clone upstream and assess divergence (v0.1.3 -> v0.12.0, protocol-breaking taproot rewrite)", "status": "done"},
+    {"id": 2, "name": "Analyze lnurlcash-kernel package contents (which parts are pure-python portable)", "status": "done"}
+  ],
+  "remaining_tasks": [
+    {"id": 3, "name": "Decide scope with user: full new-protocol port; lnurlcash-kernel handling (optional import vs dep vs skip arbitrary cw1)", "status": "not_started"},
+    {"id": 4, "name": "Read upstream router.py/db.py/models.py/signing.py in full", "status": "not_started"},
+    {"id": 5, "name": "Port new protocol (cp1/ck1/cw1/cs1/cx1, derivation, bearer short form) to extension", "status": "not_started"},
+    {"id": 6, "name": "Port username registration/lightning addresses, NIP-05, zaps (if description_hash supported), internal transfers, hash lookup, retry rule", "status": "not_started"},
+    {"id": 7, "name": "Migrations for new schema (hex(Q) keys, locked_at, username table)", "status": "not_started"},
+    {"id": 8, "name": "Update tests, run suite", "status": "not_started"},
+    {"id": 9, "name": "Bump version, tag release, update lnbits-extensions PR #842", "status": "not_started"}
+  ],
+  "blockers": [
+    {"description": "lnurlcash-kernel only ships manylinux wheels + sdist (native libbitcoinkernel); violates no-new-deps rule and is platform-fragile. Arbitrary cw1 script-path spends genuinely need it; ck1 + bearer short form are reimplementable in pure python (coincurve + taproot math already analyzed).", "type": "technical", "workaround": "pure-python reimplementation of kernel's portable modules; optional kernel import for arbitrary cw1"}
+  ],
+  "human_actions_pending": [
+    {"action": "Decide scope: full new-protocol port vs subset; how to handle lnurlcash-kernel dependency", "context": "Breaking protocol change; new deps decision conflicts with CLAUDE.md no-new-deps constraint", "blocking": true}
+  ],
+  "decisions": [
+    {"decision": "Keep per-mint coincurve keypair for signing (Option B already in repo), switch to 'Lightning Signed Message' double-sha256 wrap + cs1 encoding per new spec", "rationale": "upstream signmessage RPC / spark paths don't map to LNbits; per-mint key already deployed", "phase": "upstream-sync"}
+  ],
+  "uncommitted_files": ["?? .DS_Store"],
+  "next_action": "Ask user the scope/kernel question, then read upstream router.py + db.py fully before porting",
+  "context_notes": "Upstream cloned at /tmp/lnurl-mint-upstream (HEAD 272d948, v0.12.0). Kernel wheel unpacked at /tmp/lck/wheel/lnurlcashkernel/ — pure-python modules (encoding, taproot, sighash, policy, script) are fully portable; only verify_witness (script exec) needs the .so. /tmp contents lost on reboot — re-clone/re-download if gone. lnbits-extensions PR #842 is the one to update."
+}
