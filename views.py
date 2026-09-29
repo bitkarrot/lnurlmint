@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+
 from lnbits.core.views.generic import index, index_public
 from lnbits.decorators import check_user_exists
 

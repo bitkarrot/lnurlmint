@@ -1,9 +1,11 @@
 import time
+from base64 import b64decode, b64encode
+from collections.abc import Callable
 from typing import Optional
 
 from lnbits.db import Database
 
-from .models import Mint, MintRecord, Note
+from .models import Mint, MintRecord, Note, UsernameRegistration
 
 db = Database("ext_lnurlmint")
 
@@ -21,6 +23,11 @@ _UPDATABLE_FIELDS = frozenset({
     "min_mint_msat",
     "verify_enabled",
     "sunset_mint",
+    "sunset_date",
+    "registration_enabled",
+    "nip05_enabled",
+    "zaps_enabled",
+    "zap_relays",
 })
 
 
@@ -34,6 +41,37 @@ class PendingNoteError(Exception):
     """
 
     pass
+
+
+class OutputCollisionError(ValueError):
+    """Raised when a replacement note id (a callback's `p1`/`p2`, a mint
+    `comment`, or an auto-minted branch index) is already registered.
+
+    Carries its own message ("already in use") so it can be told apart
+    from a generic burn-side ValueError when both surface through the
+    same handler — the spec's retry-replay path reports an output
+    collision differently than an invalid input.
+    """
+
+    def __init__(self, note_id: str) -> None:
+        super().__init__("already in use")
+        self.note_id = note_id
+
+
+def _encode_zap_request(raw: str) -> str:
+    """base64 the raw zap-request JSON before storing.
+
+    LNbits' Connection.rewrite_values strips ``<.*?>`` and ``&...;``
+    patterns from every written string — a kind 9734's free-text
+    `content` could contain either, which would corrupt the verbatim
+    request a kind 9735 receipt MUST embed (clients hash it against the
+    invoice's description hash). base64 is sanitizer-proof.
+    """
+    return b64encode(raw.encode()).decode()
+
+
+def _decode_zap_request(stored: str) -> str:
+    return b64decode(stored.encode()).decode()
 
 
 def _generate_mint_privkey() -> str:
@@ -200,13 +238,14 @@ async def get_pending_mint_record(
 
     Used by the lazy-settlement poll to check whether a mint invoice
     is still awaiting note materialization. Matches on payment_hash OR
-    comment_hash so comment-protected mints (Phase 4) resolve correctly:
-    the /w endpoint passes sha256(k1) as note_id, which equals the
-    comment_hash for comment-protected mints (not the payment_hash).
+    note_id so note-keyed mints resolve correctly: the /w endpoint is
+    passed hex(Q) of the note a mint will credit, which equals the
+    record's note_id (a wallet-supplied comment output, a branch-derived
+    key, or a migrated legacy payment-hash-derived bearer note).
     """
     return await db.fetchone(
         "SELECT * FROM lnurlmint.mints_records "
-        "WHERE (payment_hash = :nid OR comment_hash = :nid) "
+        "WHERE (payment_hash = :nid OR note_id = :nid) "
         "AND mint_id = :mid AND minted = 0",
         {"nid": note_id, "mid": mint_id},
         MintRecord,
@@ -242,21 +281,22 @@ async def melt_record_exists(payment_hash: str) -> bool:
 async def mint_uses_comment(payment_hash: str, mint_id: str) -> bool:
     """Return True if the mint record used LUD-25 comment protection.
 
-    Used by the /verify endpoint (Phase 4) to gate whether the preimage
-    is safe to serve: a comment-protected mint keys the note by the
-    WALLET-supplied comment hash (not the payment preimage), so the
-    preimage is no longer the bearer secret and can be revealed. A
-    no-comment mint keys the note by the payment_hash (which is sha256
-    of the preimage) — the preimage IS the bearer secret and must not
-    be served. Scoped by mint_id so a verify call on mint A cannot
-    resolve a payment_hash belonging to mint B (W-01).
+    Used by the /verify endpoint to gate whether the preimage is safe to
+    serve: a comment-protected mint keys the note by the WALLET-supplied
+    note id (a cp1/h comment, or a registered branch's derived key), not
+    the payment preimage, so the preimage is no longer the bearer secret
+    and can be revealed. A legacy no-comment mint (migrated with
+    comment_protected=0) keys its note under Q(payment_hash) — the
+    preimage IS still the bearer secret there and must not be served.
+    Scoped by mint_id so a verify call on mint A cannot resolve a
+    payment_hash belonging to mint B (W-01).
     """
     row = await db.fetchone(
-        "SELECT comment_hash FROM lnurlmint.mints_records "
+        "SELECT comment_protected FROM lnurlmint.mints_records "
         "WHERE payment_hash = :ph AND mint_id = :mid",
         {"ph": payment_hash, "mid": mint_id},
     )
-    return bool(row and row["comment_hash"] is not None)
+    return bool(row and row["comment_protected"])
 
 
 async def mint_pr(payment_hash: str, mint_id: str) -> Optional[str]:
@@ -337,44 +377,43 @@ async def get_mint_id_for_note(note_id: str) -> Optional[str]:
 async def settle_mint(payment_hash: str) -> Optional[int]:
     """Atomically materialize a note from a settled mint invoice.
 
-    Compare-and-set: UPDATE mints_records SET minted=1 WHERE minted=0,
-    check rowcount==1 (only the winner proceeds), then INSERT the note.
-    All in one `async with db.connect() as conn:` block for atomicity
-    (REC-03). Returns the note's amount_msat, or None if already
-    settled by a concurrent request (TEST-02 double-mint race guard).
+    Compare-and-set: UPDATE mints_records SET minted=1 WHERE minted=0
+    AND note_id IS NOT NULL, check rowcount==1 (only the winner
+    proceeds), then INSERT the note keyed by its recorded note_id
+    (hex(Q)) with locked_at=now — where a spend's relative timelock
+    (BIP-68, via spend.py) starts counting. All in one
+    `async with db.connect() as conn:` block for atomicity (REC-03).
+    Returns the note's amount_msat, or None if already settled by a
+    concurrent request (TEST-02 double-mint race guard).
 
-    The note id is the comment_hash if present (comment-protected mint,
-    Phase 4), otherwise the payment_hash (plain hash-keyed mint).
-    No spendable credential is stored — only its hash (SEC-02).
+    No spendable credential is stored — only the note's public output
+    key Q (SEC-02).
     """
     async with db.connect() as conn:
         result = await conn.execute(
             "UPDATE lnurlmint.mints_records SET minted = 1 "
-            "WHERE payment_hash = :ph AND minted = 0",
+            "WHERE payment_hash = :ph AND minted = 0 AND note_id IS NOT NULL",
             {"ph": payment_hash},
         )
         if result.rowcount != 1:
             # Already settled by a concurrent request — no-op.
             return None
         row = await conn.fetchone(
-            "SELECT amount_msat, comment_hash, mint_id "
+            "SELECT amount_msat, note_id, mint_id "
             "FROM lnurlmint.mints_records WHERE payment_hash = :ph",
             {"ph": payment_hash},
         )
         if row is None:
             return None
-        note_id = (
-            row["comment_hash"] if row["comment_hash"] is not None
-            else payment_hash
-        )
         await conn.execute(
             "INSERT INTO lnurlmint.notes "
-            "(id, mint_id, amount_msat, spent, pending) "
-            "VALUES (:id, :mint_id, :amount, 0, 0)",
+            "(id, mint_id, amount_msat, spent, pending, locked_at) "
+            "VALUES (:id, :mint_id, :amount, 0, 0, :locked)",
             {
-                "id": note_id,
+                "id": row["note_id"],
                 "mint_id": row["mint_id"],
                 "amount": row["amount_msat"],
+                "locked": int(time.time()),
             },
         )
         return row["amount_msat"]
@@ -526,83 +565,58 @@ async def record_mint_record(
     mint_id: str,
     pr: str,
     amount_msat: int,
-    comment_hash: Optional[str] = None,
+    note_id: str,
+    zap_request: Optional[str] = None,
 ) -> None:
     """Record a pending mint invoice awaiting settlement.
 
     Stores the NET amount (after fee) — the note is credited with
-    net_amount_msat when it materializes via settle_mint. The minted
-    flag starts at 0 (pending) and is flipped to 1 by settle_mint's
-    compare-and-set on first settlement poll. No spendable credential
-    is stored — only the payment hash and invoice string (SEC-02).
+    net_amount_msat when it materializes via settle_mint, keyed by
+    `note_id` = hex(Q): the WALLET-supplied output (a `cp1` or a bearer
+    note's hex `h` short form), a registered username's branch-derived
+    key, or — for a migrated pre-m004 record — Q(payment_hash). No
+    spendable credential is stored — only the payment hash, the invoice
+    string (for LUD-21 verify), and the note's public output key
+    (SEC-02).
 
-    INSERT OR IGNORE handles the edge case where the same payment_hash
-    is submitted twice (the PRIMARY KEY constraint prevents duplicates).
-
-    When comment_hash is not None (LUD-25 comment protection, Phase 4),
-    the collision check runs first inside a single db.connect() block:
-    a comment_hash that already exists as a note id, another mint
-    record's comment_hash, OR a pending mint's payment_hash is rejected
-    with ValueError("comment already in use"). The payment_hash check
-    prevents a comment_hash from colliding with a pending no-comment
-    mint's payment_hash — which would let the comment-protected mint
-    settle first and brick the no-comment mint's settle_mint INSERT
-    forever (PK collision on notes.id). A UNIQUE index on comment_hash
-    (m003) is the last line of defense against a TOCTOU race between
-    the SELECT and INSERT under db.connect() (which is a process-level
-    lock, not a DB transaction — LNbits' Connection.execute auto-commits
-    per statement).
+    `note_id` is always set (comment protection or a branch is mandatory
+    in the taproot protocol), so the collision check always runs inside
+    a single db.connect() block: a note_id that already exists as a note,
+    another mint record's note_id, OR a pending mint's payment_hash is
+    rejected with ValueError("already in use"). The checks are global
+    (NOT mint-scoped) because notes.id is a global PRIMARY KEY — a
+    planted duplicate under any mint would brick settle_mint's INSERT
+    forever.
     """
-    if comment_hash is None:
-        # No comment protection — payment_hash is the PRIMARY KEY, so
-        # INSERT OR IGNORE handles duplicates. Single-statement path.
-        await db.execute(
-            "INSERT OR IGNORE INTO lnurlmint.mints_records "
-            "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
-            "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
-            {
-                "ph": payment_hash,
-                "mid": mint_id,
-                "pr": pr,
-                "amount": amount_msat,
-                "ch": comment_hash,
-            },
-        )
-        return
-
-    # Comment-protected mint — collision check + INSERT under db.connect()
-    # (process-level lock). The UNIQUE index on comment_hash (m003) is the
-    # last line of defense against a TOCTOU race between the SELECT and
-    # INSERT. Use a plain INSERT (not INSERT OR IGNORE) so a unique
-    # violation from a concurrent insert surfaces as an error rather than
-    # silently dropping the row.
     async with db.connect() as conn:
         collision = await conn.fetchone(
-            "SELECT 1 FROM lnurlmint.notes WHERE id = :ch "
+            "SELECT 1 FROM lnurlmint.notes WHERE id = :nid "
             "UNION SELECT 1 FROM lnurlmint.mints_records "
-            "WHERE comment_hash = :ch OR payment_hash = :ch",
-            {"ch": comment_hash},
+            "WHERE note_id = :nid OR payment_hash = :nid",
+            {"nid": note_id},
         )
         if collision is not None:
-            raise ValueError("comment already in use")
+            raise ValueError("already in use")
         try:
             await conn.execute(
                 "INSERT INTO lnurlmint.mints_records "
-                "(payment_hash, mint_id, pr, amount_msat, minted, comment_hash) "
-                "VALUES (:ph, :mid, :pr, :amount, 0, :ch)",
+                "(payment_hash, mint_id, pr, amount_msat, minted, note_id, "
+                "comment_protected, zap_request) "
+                "VALUES (:ph, :mid, :pr, :amount, 0, :nid, 1, :zap)",
                 {
                     "ph": payment_hash,
                     "mid": mint_id,
                     "pr": pr,
                     "amount": amount_msat,
-                    "ch": comment_hash,
+                    "nid": note_id,
+                    "zap": _encode_zap_request(zap_request) if zap_request else None,
                 },
             )
-        except Exception:
-            # UNIQUE violation on comment_hash from a concurrent insert
-            # — the collision check passed but another request inserted
-            # the same comment_hash in the gap. Treat as a collision.
-            raise ValueError("comment already in use")
+        except Exception as exc:
+            # PK/unique violation from a concurrent insert — the
+            # collision check passed but another request inserted in the
+            # gap. Treat as a collision.
+            raise ValueError("already in use") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -638,25 +652,27 @@ async def swap(
     Validate-then-burn-then-mint: all burn validations (not spent, not
     pending) and all mint collision checks (notes + mints_records)
     complete before any mutation. Raises ValueError on invalid/spent/
-    duplicate burn id or collision on either table; PendingNoteError on
-    pending burn id. The mint_id scoping (SEC-07) prevents cross-wallet
-    note access — all queries are scoped by mint_id.
+    duplicate burn id; OutputCollisionError on a mint-side collision;
+    PendingNoteError on a pending burn id. The mint_id scoping (SEC-07)
+    prevents cross-wallet note burns — but the mint-side collision
+    checks are deliberately global, because notes.id is a global
+    PRIMARY KEY (a squatter note planted under another mint's pending
+    mint's note_id would brick that mint's settle INSERT forever -
+    the A1 pending-mint squat attack, TEST-08).
 
-    The collision check on mints_records prevents the A1 pending-mint
-    squat attack (TEST-08): a squatter note planted under a victim's
-    future note id would shadow that mint and brick settle_mint's
-    INSERT forever. The generic error message reveals no information
-    about which table collided (no info leak).
+    Per LUD-25, `mint_note_ids` are output keys (hex(Q)) the WALLET
+    disclosed as `p1`/`p2` — this side never generates, sees, or
+    persists a spend.
+
+    Also records this burn keyed by the exact set of `burn_ids` in the
+    same connect block — LUD-25's "Retrying a mutation" needs find_burn
+    to answer a retried rotate/split/merge with the original result
+    rather than "already spent".
     """
     async with db.connect() as conn:
         # 1. Dedup check — duplicate burn ids or mint note ids are
-        # rejected before any validation. The source relies on the burn
-        # loop finding the note already spent on the second pass; our
-        # validate-then-burn structure doesn't burn during validation,
-        # so we check duplicates explicitly (RQ1 gotcha #5).
+        # rejected before any validation.
         if len(set(burn_ids)) != len(burn_ids):
-            raise ValueError("Invalid or already spent k1.")
-        if len(set(mint_note_ids)) != len(mint_note_ids):
             raise ValueError("Invalid or already spent k1.")
 
         # 2. Validation phase — complete before any mutation.
@@ -670,24 +686,30 @@ async def swap(
                 raise ValueError("Invalid or already spent k1.")
             if row["pending"]:
                 raise PendingNoteError("pending")
+        seen_mint_ids: set = set()
         for note_id in mint_note_ids:
-            # Collision check: mints_records (pending/settled mint
-            # invoices) — prevents the A1 pending-mint squat attack.
+            # Collision check: mints_records.note_id (the note some mint
+            # invoice will credit once paid) — as taken as one already on
+            # file, per LUD-25. Global, not mint-scoped: see docstring.
             collision = await conn.fetchone(
                 "SELECT 1 FROM lnurlmint.mints_records "
-                "WHERE payment_hash = :id",
+                "WHERE note_id = :id",
                 {"id": note_id},
             )
             if collision is not None:
-                raise ValueError("Invalid or already spent k1.")
-            # Collision check: notes (existing outstanding/spent/pending
-            # notes) — prevents overwriting an existing note id.
-            collision = await conn.fetchone(
-                "SELECT 1 FROM lnurlmint.notes WHERE id = :id",
-                {"id": note_id},
-            )
-            if collision is not None:
-                raise ValueError("Invalid or already spent k1.")
+                raise OutputCollisionError(note_id)
+            if (
+                note_id in seen_mint_ids
+                or (
+                    await conn.fetchone(
+                        "SELECT 1 FROM lnurlmint.notes WHERE id = :id",
+                        {"id": note_id},
+                    )
+                )
+                is not None
+            ):
+                raise OutputCollisionError(note_id)
+            seen_mint_ids.add(note_id)
 
         # 3. Burn phase — all validated, no failure expected.
         for note_id in burn_ids:
@@ -698,13 +720,334 @@ async def swap(
             )
 
         # 4. Mint phase — all collision-checked, no failure expected.
-        for note_id, amount_msat in zip(mint_note_ids, mint_amounts):
+        locked_at = int(time.time())
+        for note_id, amount_msat in zip(mint_note_ids, mint_amounts, strict=True):
             await conn.execute(
                 "INSERT INTO lnurlmint.notes "
-                "(id, mint_id, amount_msat, spent, pending) "
-                "VALUES (:id, :mint_id, :amount, 0, 0)",
-                {"id": note_id, "mint_id": mint_id, "amount": amount_msat},
+                "(id, mint_id, amount_msat, spent, pending, locked_at) "
+                "VALUES (:id, :mint_id, :amount, 0, 0, :locked)",
+                {
+                    "id": note_id,
+                    "mint_id": mint_id,
+                    "amount": amount_msat,
+                    "locked": locked_at,
+                },
             )
+
+        # 5. Record the burn for LUD-25 mutation-replay (find_burn).
+        await conn.execute(
+            "INSERT INTO lnurlmint.burns "
+            "(burn_key, mint_id, id, id2, amount1_msat, amount2_msat) "
+            "VALUES (:bk, :mid, :id, :id2, :a1, :a2)",
+            {
+                "bk": _burn_key(burn_ids),
+                "mid": mint_id,
+                "id": mint_note_ids[0],
+                "id2": mint_note_ids[1] if len(mint_note_ids) > 1 else None,
+                "a1": mint_amounts[0],
+                "a2": mint_amounts[1] if len(mint_amounts) > 1 else None,
+            },
+        )
+
+
+def _burn_key(note_ids: list[str]) -> str:
+    """Canonical identity of a burn: the note ids it spent, order
+    independent (a merge's k1s can arrive in any order) but otherwise
+    exact - the same set burned by two different requests is the same
+    burn."""
+    return "|".join(sorted(note_ids))
+
+
+async def find_burn(
+    note_ids: list[str], mint_id: str
+) -> Optional[tuple[str, Optional[str], int, Optional[int]]]:
+    """If `note_ids`, as a set, were burned together by one earlier
+    rotate/split/merge on this mint (see swap), returns the (id, id2,
+    amount1_msat, amount2_msat) that burn produced — everything the
+    callback's LUD-25 retry handling needs to answer a retried request
+    with the original result instead of "already spent". None if this
+    exact set was never burned together here — including a partial
+    overlap, which is a genuine conflict, not a replay."""
+    row = await db.fetchone(
+        "SELECT id, id2, amount1_msat, amount2_msat FROM lnurlmint.burns "
+        "WHERE mint_id = :mid AND burn_key = :bk",
+        {"mid": mint_id, "bk": _burn_key(note_ids)},
+    )
+    return (row["id"], row["id2"], row["amount1_msat"], row["amount2_msat"]) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Note lookups for the taproot protocol (spend verification needs
+# locked_at; informational endpoints need spent/pending for known notes)
+# ---------------------------------------------------------------------------
+
+
+async def note_record(
+    note_id: str, mint_id: str
+) -> Optional[tuple[int, int, bool, bool]]:
+    """(amount_msat, locked_at, spent, pending) of the note `note_id`
+    (hex(Q)) on this mint, spent or not — what verifying a spend of it
+    needs (locked_at starts a relative timelock), even for a burn being
+    retried. None if this mint never issued it."""
+    row = await db.fetchone(
+        "SELECT amount_msat, locked_at, spent, pending "
+        "FROM lnurlmint.notes WHERE id = :id AND mint_id = :mid",
+        {"id": note_id, "mid": mint_id},
+    )
+    return (
+        (row["amount_msat"], row["locked_at"], bool(row["spent"]), bool(row["pending"]))
+        if row
+        else None
+    )
+
+
+async def note_amount(note_id: str, mint_id: str) -> Optional[int]:
+    """Value of the outstanding (unspent) note `note_id` on this mint."""
+    row = await db.fetchone(
+        "SELECT amount_msat FROM lnurlmint.notes "
+        "WHERE id = :id AND spent = 0 AND mint_id = :mid",
+        {"id": note_id, "mid": mint_id},
+    )
+    return row["amount_msat"] if row else None
+
+
+async def note_pending(note_id: str, mint_id: str) -> bool:
+    """Whether `note_id` names an outstanding note on this mint currently
+    reserved by an in-flight melt (see mark_pending). The informational
+    withdraw endpoint must say so instead of advertising it as
+    withdrawable — exactly the lie a sell-during-melt scam needs."""
+    row = await db.fetchone(
+        "SELECT pending FROM lnurlmint.notes "
+        "WHERE id = :id AND spent = 0 AND mint_id = :mid",
+        {"id": note_id, "mid": mint_id},
+    )
+    return bool(row and row["pending"])
+
+
+async def note_spent(note_id: str, mint_id: str) -> bool:
+    """Whether `note_id` names a note this mint actually issued and has
+    since burned — as opposed to one that never existed at all. Burned
+    rows are kept, so this distinguishes "already spent" from "unknown"
+    for callers (the hash-lookup endpoint) that want to report which."""
+    row = await db.fetchone(
+        "SELECT spent FROM lnurlmint.notes WHERE id = :id AND mint_id = :mid",
+        {"id": note_id, "mid": mint_id},
+    )
+    return bool(row and row["spent"])
+
+
+async def outstanding_msat(mint_id: str) -> int:
+    """Total value (msat) of every currently outstanding bearer note on
+    this mint — its total liability, reported on the mint-address
+    discovery response and the public one-pager. Includes notes reserved
+    by an in-flight melt (pending = 1): a reservation is not a burn —
+    the note is still outstanding, per LUD-25, until its melt settles.
+
+    A lower bound: a settled-but-never-looked-up mint still only exists
+    as a row in mints_records (lazy materialization, see settle_mint)."""
+    row = await db.fetchone(
+        "SELECT COALESCE(SUM(amount_msat), 0) AS total "
+        "FROM lnurlmint.notes WHERE spent = 0 AND mint_id = :mid",
+        {"mid": mint_id},
+    )
+    return int(row["total"]) if row else 0
+
+
+async def id_in_use(note_id: str) -> bool:
+    """Whether `note_id` (hex(Q)) already names a note — spent or not,
+    on ANY mint — or the note some mint invoice will credit once paid.
+    Global on purpose: notes.id is a global PRIMARY KEY, so a planted
+    duplicate under a different mint would still brick settle_mint's
+    INSERT (the A1 squat attack)."""
+    row = await db.fetchone(
+        "SELECT 1 FROM lnurlmint.notes WHERE id = :nid "
+        "UNION SELECT 1 FROM lnurlmint.mints_records WHERE note_id = :nid",
+        {"nid": note_id},
+    )
+    return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Username registrations (LUD-25 cx1 lightning-address auto-mint)
+#
+# Per-mint: every mint has its own username namespace (the PRIMARY KEY is
+# (mint_id, username)). A registration is a public-key binding, never a
+# balance or an account.
+# ---------------------------------------------------------------------------
+
+
+async def upsert_username(
+    mint_id: str, username: str, cx1_hex: str, nostr_pubkey_hex: Optional[str] = None
+) -> None:
+    """Claim `username` for the watch-only branch `cx1_hex` on this mint,
+    or wholesale replace an existing claim's branch/npub — the endpoint
+    gates every call behind its own ownership-proof signature before ever
+    calling this (a fresh claim proves control of THIS cx1, an overwrite
+    proves control of the branch currently on file). `next_index` always
+    resets to 0 — an overwrite means a different branch, whose own index
+    0 was never tried yet.
+
+    `nostr_pubkey_hex`, if given, doubles `username` as a NIP-05 name.
+    Omitting it on an overwrite clears any previously registered one —
+    this call replaces the registration wholesale, it does not merge.
+    """
+    await db.execute(
+        "INSERT INTO lnurlmint.usernames "
+        "(mint_id, username, cx1, nostr_pubkey, next_index) "
+        "VALUES (:mid, :u, :cx1, :npub, 0) "
+        + (
+            "ON CONFLICT(mint_id, username) DO UPDATE SET "
+            "cx1 = excluded.cx1, nostr_pubkey = excluded.nostr_pubkey, "
+            "next_index = 0"
+            if db.type == "SQLITE"
+            else "ON CONFLICT (mint_id, username) DO UPDATE SET "
+            "cx1 = EXCLUDED.cx1, nostr_pubkey = EXCLUDED.nostr_pubkey, "
+            "next_index = 0"
+        ),
+        {"mid": mint_id, "u": username, "cx1": cx1_hex, "npub": nostr_pubkey_hex},
+    )
+
+
+async def delete_username(mint_id: str, username: str) -> None:
+    """Free `username` on this mint entirely — back to unclaimed,
+    first-come-first-served. A no-op if it was never claimed."""
+    await db.execute(
+        "DELETE FROM lnurlmint.usernames WHERE mint_id = :mid AND username = :u",
+        {"mid": mint_id, "u": username},
+    )
+
+
+async def username_branch(mint_id: str, username: str) -> Optional[str]:
+    """The cx1 hex (P || chain_code) registered under `username` on this
+    mint, or None if it was never claimed."""
+    row = await db.fetchone(
+        "SELECT cx1 FROM lnurlmint.usernames WHERE mint_id = :mid AND username = :u",
+        {"mid": mint_id, "u": username},
+    )
+    return row["cx1"] if row else None
+
+
+async def username_nostr_pubkey(mint_id: str, username: str) -> Optional[str]:
+    """The hex Nostr pubkey `username` registered on this mint, or None —
+    "not a NIP-05 name" to the nostr.json endpoint."""
+    row = await db.fetchone(
+        "SELECT nostr_pubkey FROM lnurlmint.usernames "
+        "WHERE mint_id = :mid AND username = :u",
+        {"mid": mint_id, "u": username},
+    )
+    return row["nostr_pubkey"] if row else None
+
+
+async def next_index_hint(mint_id: str, username: str) -> Optional[int]:
+    """The persisted best-known next-unused index on `username`'s
+    registered branch (the `text/cpub` metadata hint, LUD-25 Internal
+    transfer) — purely advisory: a WALLET starts guessing from it, but a
+    stale or already-taken index is still rejected exactly like any other
+    p1/p2 collision. None if `username` was never claimed."""
+    row = await db.fetchone(
+        "SELECT next_index FROM lnurlmint.usernames "
+        "WHERE mint_id = :mid AND username = :u",
+        {"mid": mint_id, "u": username},
+    )
+    return row["next_index"] if row else None
+
+
+async def list_usernames(mint_id: str) -> list[UsernameRegistration]:
+    """All registered usernames for a mint (management API)."""
+    return await db.fetchall(
+        "SELECT * FROM lnurlmint.usernames WHERE mint_id = :mid "
+        "ORDER BY username",
+        {"mid": mint_id},
+        UsernameRegistration,
+    )
+
+
+async def claim_next_index(
+    mint_id: str, username: str, derive: Callable[[int], str]
+) -> tuple[str, int]:
+    """Pick and reserve the next usable note index on `username`'s
+    registered branch — LUD-25's own race-avoidance under Lightning
+    Address auto-mint: `derive(i)` is tried starting at the persisted
+    next_index, skipping any index whose resulting pubkey already names
+    an outstanding or previously-minted note (the same collision
+    record_mint_record itself would reject) rather than crediting into an
+    index a pending rotate/split/merge might also be about to install.
+    Persists next_index past the winner and returns (pk_hex, index).
+    Raises ValueError if `username` was never registered on this mint."""
+    async with db.connect() as conn:
+        row = await conn.fetchone(
+            "SELECT next_index FROM lnurlmint.usernames "
+            "WHERE mint_id = :mid AND username = :u",
+            {"mid": mint_id, "u": username},
+        )
+        if row is None:
+            raise ValueError("Unknown username.")
+        index = row["next_index"]
+        while True:
+            pk_hex = derive(index)
+            collision = await conn.fetchone(
+                "SELECT 1 FROM lnurlmint.notes WHERE id = :nid "
+                "UNION SELECT 1 FROM lnurlmint.mints_records WHERE note_id = :nid",
+                {"nid": pk_hex},
+            )
+            if collision is None:
+                break
+            index += 1
+        await conn.execute(
+            "UPDATE lnurlmint.usernames SET next_index = :i "
+            "WHERE mint_id = :mid AND username = :u",
+            {"i": index + 1, "mid": mint_id, "u": username},
+        )
+        return pk_hex, index
+
+
+# ---------------------------------------------------------------------------
+# NIP-57 zap bookkeeping (see nostr.py / views_lnurl.py)
+# ---------------------------------------------------------------------------
+
+
+async def pending_zap_mints(mint_id: str, created_since: int, limit: int) -> list[str]:
+    """Payment hashes of the `limit` newest unpaid zap invoices on this
+    mint created at or after `created_since` (unix seconds) — what the
+    settlement poll checks. Older ones are left alone."""
+    rows = await db.fetchall(
+        "SELECT payment_hash FROM lnurlmint.mints_records "
+        "WHERE mint_id = :mid AND minted = 0 AND zap_request IS NOT NULL "
+        "AND created_at >= :since ORDER BY created_at DESC LIMIT :limit",
+        {"mid": mint_id, "since": created_since, "limit": limit},
+    )
+    return [r["payment_hash"] for r in rows]
+
+
+async def unpublished_zaps(mint_id: str) -> list[tuple[str, str, str]]:
+    """(payment_hash, pr, zap_request) of every settled zap invoice on
+    this mint whose kind 9735 receipt has not reached a relay yet. The
+    stored zap_request is base64 (see _encode_zap_request) — decoded here
+    back to the verbatim request."""
+    rows = await db.fetchall(
+        "SELECT payment_hash, pr, zap_request FROM lnurlmint.mints_records "
+        "WHERE mint_id = :mid AND minted = 1 AND zap_request IS NOT NULL "
+        "AND zap_receipt IS NULL",
+        {"mid": mint_id},
+    )
+    return [(r["payment_hash"], r["pr"], _decode_zap_request(r["zap_request"])) for r in rows]
+
+
+async def mark_zap_published(payment_hash: str, receipt_id: str) -> None:
+    await db.execute(
+        "UPDATE lnurlmint.mints_records SET zap_receipt = :rid "
+        "WHERE payment_hash = :ph",
+        {"rid": receipt_id, "ph": payment_hash},
+    )
+
+
+async def zaps_enabled_mints() -> list[str]:
+    """Mint ids with NIP-57 zaps turned on — the zap-poll task's
+    iteration set (empty for most installs: a single cheap SELECT)."""
+    rows = await db.fetchall(
+        "SELECT id FROM lnurlmint.mints WHERE zaps_enabled = 1"
+    )
+    return [r["id"] for r in rows]
 
 
 # ---------------------------------------------------------------------------

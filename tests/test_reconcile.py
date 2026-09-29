@@ -13,10 +13,8 @@ loguru sink capture), and 2 server-lifespan tests adapted to call
 spinning up a TestClient with a server lifespan.
 """
 
-import bolt11
-from hashlib import sha256
-from unittest.mock import MagicMock
 
+import bolt11
 import pytest
 from loguru import logger as loguru_logger
 
@@ -29,6 +27,7 @@ from lnurlmint.services import (
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     fake_invoice,
+    k1_id,
     mint_note,
 )
 
@@ -65,7 +64,7 @@ async def test_reconcile_finalizes_a_pending_note_once_confirmed_paid(
     await reconcile_pending_melts()
 
     # burned for good, not just still-pending
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     note = await get_note(note_id, TEST_MINT_ID)
     assert note.spent is True, "note must be spent after reconcile confirms paid"
     assert note.pending is False
@@ -109,7 +108,7 @@ async def test_reconcile_resolves_a_note_that_becomes_confirmable_later(
     # First reconcile: still unconfirmable (is_payment_complete_raises
     # was set True by _leave_a_note_pending) - note stays pending.
     await reconcile_pending_melts()
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
+    note_id = k1_id(k1)
     note = await get_note(note_id, TEST_MINT_ID)
     assert note.pending is True, "note must stay pending when unconfirmable"
 

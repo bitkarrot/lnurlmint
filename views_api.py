@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 from uuid import uuid4
 
 from bech32 import bech32_encode, convertbits
@@ -11,17 +12,18 @@ from lnbits.wallets import get_funding_source
 from lnbits.wallets.base import Feature
 
 from .crud import (
+    _generate_mint_privkey,
     create_mint,
     delete_mint,
     get_mint,
+    get_mint_activity,
     get_mint_by_id,
     get_mints_by_wallet,
     get_outstanding_notes,
-    get_mint_activity,
+    list_usernames,
     update_mint,
-    _generate_mint_privkey,
 )
-from .models import Mint, CreateMint, UpdateMint, MintResponse
+from .models import CreateMint, Mint, MintResponse, UpdateMint
 from .services import _public_base_url, max_mintable_msat
 from .signing import mint_pubkey
 
@@ -55,6 +57,11 @@ async def api_create_mint(
         min_mint_msat=data.min_mint_msat,
         verify_enabled=data.verify_enabled,
         sunset_mint=data.sunset_mint,
+        sunset_date=data.sunset_date,
+        registration_enabled=data.registration_enabled,
+        nip05_enabled=data.nip05_enabled,
+        zaps_enabled=data.zaps_enabled,
+        zap_relays=data.zap_relays,
         mint_privkey=privkey,
         created_at=now,
         updated_at=now,
@@ -193,8 +200,63 @@ async def api_get_mint_activity(
 
 
 # ---------------------------------------------------------------------------
-# Public mint info (Phase 6 — unauthenticated one-pager data endpoint)
+# Public mint info (unauthenticated one-pager data endpoint)
 # ---------------------------------------------------------------------------
+
+
+async def _public_node_info() -> Optional[dict]:
+    """Node info for the shared funding source, if it implements the
+    Node API — the same node every mint on this LNbits instance draws
+    on. Already public on the LN graph; returns None on any failure
+    (graceful degradation)."""
+    try:
+        funding_source = get_funding_source()
+        if (
+            funding_source.features
+            and Feature.nodemanager in funding_source.features
+            and funding_source.__node_cls__
+        ):
+            node = funding_source.__node_cls__(funding_source)
+            public_info = await node.get_public_info()
+            return {
+                "id": public_info.id,
+                "alias": public_info.alias,
+                "color": public_info.color,
+                "num_peers": public_info.num_peers,
+                "capacity_msat": public_info.channel_stats.total_capacity,
+                "num_channels": sum(
+                    public_info.channel_stats.counts.values()
+                ),
+                "addresses": public_info.addresses,
+                "uris": [
+                    a for a in (getattr(public_info, "uris", None) or [])
+                ]
+                or None,
+            }
+    except Exception as exc:
+        logger.debug(f"public mint info: node info unavailable: {exc}")
+    return None
+
+
+@lnurlmint_api_router.get("/{mint_id}/usernames")
+async def api_get_mint_usernames(
+    mint_id: str,
+    wallet: WalletTypeInfo = Depends(require_invoice_key),
+) -> list:
+    """List registered usernames (cx1 lightning addresses) for a mint."""
+    mint = await get_mint(mint_id, wallet.wallet.id)
+    if mint is None:
+        raise HTTPException(status_code=404, detail="Mint not found")
+    regs = await list_usernames(mint_id)
+    return [
+        {
+            "username": r.username,
+            "cx1": r.cx1,
+            "nostr_pubkey": r.nostr_pubkey,
+            "next_index": r.next_index,
+        }
+        for r in regs
+    ]
 
 
 @lnurlmint_public_router.get("/{mint_id}")
@@ -203,8 +265,9 @@ async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
 
     Returns mint metadata (username, limits, sunset, onion_url),
     the LNURL of the payRequest (bech32-encoded, Tor-aware), the
-    mint's public signing key, and node info (if the funding source
-    implements the Node API). Returns 404 for unknown mint_id.
+    mint's public signing key, outstanding liability, and node info
+    (if the funding source implements the Node API). Returns 404 for
+    unknown mint_id.
 
     No sensitive data is exposed: no wallet_id, no mint_privkey,
     no note secrets. The mint_pubkey is the mint's public signing
@@ -219,31 +282,7 @@ async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
     lnurl_data = convertbits(lnurl_url.encode(), 8, 5, True)
     lnurl = bech32_encode("lnurl", lnurl_data).upper()
 
-    # Fetch node info if the funding source implements the Node API.
-    node_info = None
-    try:
-        funding_source = get_funding_source()
-        if (
-            funding_source.features
-            and Feature.nodemanager in funding_source.features
-            and funding_source.__node_cls__
-        ):
-            node = funding_source.__node_cls__(funding_source)
-            public_info = await node.get_public_info()
-            node_info = {
-                "id": public_info.id,
-                "alias": public_info.alias,
-                "color": public_info.color,
-                "num_peers": public_info.num_peers,
-                "capacity_msat": public_info.channel_stats.total_capacity,
-                "num_channels": sum(
-                    public_info.channel_stats.counts.values()
-                ),
-                "addresses": public_info.addresses,
-            }
-    except Exception as exc:
-        logger.debug(f"public mint info: node info unavailable: {exc}")
-        # Graceful degradation — node_info stays null.
+    from .crud import outstanding_msat
 
     return {
         "username": mint.username,
@@ -251,7 +290,9 @@ async def api_get_public_mint_info(mint_id: str, request: Request) -> dict:
         "min_mint_msat": mint.min_mint_msat,
         "max_mintable_msat": max_mintable_msat(mint),
         "sunset_mint": mint.sunset_mint,
+        "sunset_date": mint.sunset_date,
         "onion_url": mint.onion_url,
         "mint_pubkey": mint_pubkey(mint),
-        "node_info": node_info,
+        "outstanding_msat": await outstanding_msat(mint.id),
+        "node_info": await _public_node_info(),
     }

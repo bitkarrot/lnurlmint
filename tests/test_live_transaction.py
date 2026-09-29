@@ -4,16 +4,16 @@ This script simulates the full bearer-note lifecycle against a running
 LNbits instance:
 
   1. GET /lnurlp/{mint_id}  — fetch the payRequest
-  2. GET /p/cb/{mint_id}    — request an invoice (mint)
-  3. Pay the invoice internally via LNbits API
+  2. GET /p/cb/{mint_id}    — request an invoice (mint, comment=<h> required)
+  3. Pay the invoice via LNbits API
   4. GET /w/{mint_id}?k1=   — query the note (triggers lazy settlement)
-  5. GET /w/cb/{mint_id}    — rotate the note
+  5. GET /w/cb/{mint_id}    — rotate the note (p1=<new h>)
   6. GET /w/{mint_id}?k1=   — query the rotated note
   7. GET /w/cb/{mint_id}    — melt the note back to sats
 
 Requirements:
   - LNbits running on http://localhost:5000
-  - A mint exists (provide mint_id or the script will list available mints)
+  - A mint exists (provide mint_id)
   - Two wallet API keys: the mint owner's (invoice key) and a payer's (admin key)
 
 Usage:
@@ -51,7 +51,8 @@ def step(n: int, msg: str):
 
 
 def gen_preimage() -> tuple[str, str]:
-    """Generate a random 32-byte preimage and its sha256 hash (hex)."""
+    """Generate a random 32-byte preimage (the bearer note's k1) and its
+    sha256 hash `h` (what a WALLET sends as `comment`/`p1`)."""
     preimage = secrets.token_hex(32)
     h = hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
     return preimage, h
@@ -69,14 +70,22 @@ async def run(mint_id: str, owner_key: str, payer_key: str, amount_msat: int):
     print(f"  maxSendable = {pay_req['maxSendable']} msat")
     print(f"  callback    = {pay_req['callback']}")
     print(f"  withdrawLink = {pay_req.get('withdrawLink', 'N/A')}")
+    print(f"  commentAllowed = {pay_req.get('commentAllowed')}")
     assert amount_msat >= pay_req["minSendable"], "amount below minSendable"
     assert amount_msat <= pay_req["maxSendable"], "amount above maxSendable"
 
     # ── Step 2: Request an invoice ──────────────────────────────
-    step(2, f"GET /p/cb/{mint_id}?amount={amount_msat} — request invoice")
-    resp = await client.get(f"/lnurlmint/p/cb/{mint_id}", params={"amount": amount_msat})
+    # Under the taproot protocol every mint is keyed by the WALLET's own
+    # output — a fresh preimage's hash `h` names the bearer note.
+    k1, h = gen_preimage()
+    step(2, f"GET /p/cb/{mint_id}?amount={amount_msat}&comment={h[:16]}... — request invoice")
+    resp = await client.get(
+        f"/lnurlmint/p/cb/{mint_id}",
+        params={"amount": amount_msat, "comment": h},
+    )
     assert resp.status_code == 200, f"pay callback failed: {resp.status_code} {resp.text}"
     pay_resp = resp.json()
+    assert "pr" in pay_resp, f"mint refused: {pay_resp}"
     pr = pay_resp["pr"]
     print(f"  invoice = {pr[:60]}...")
     print(f"  disposable = {pay_resp.get('disposable')}")
@@ -100,78 +109,55 @@ async def run(mint_id: str, owner_key: str, payer_key: str, amount_msat: int):
     await asyncio.sleep(2)
 
     # ── Step 4: Query the note (triggers lazy settlement) ───────
-    step(4, "GET /w/{mint_id}?k1={payment_hash} — query the note")
-    # For no-comment mints, k1 = preimage, and sha256(k1) = payment_hash = note_id
-    # But we don't have the actual preimage for internal payments.
-    # The note_id IS the payment_hash (sha256(preimage) = payment_hash for LN).
-    # We query with k1 = payment_hash (this is what the holder would do
-    # if they know the preimage; for internal payments the preimage == hash
-    # in the test fixture's FakeWallet, but for real backends we need the
-    # actual preimage from the payer's wallet).
-    #
-    # For this test script, we trigger settlement via the verify endpoint
-    # (which calls _try_settle_mint internally) or by polling /w with the
-    # note_id directly.
-    resp = await client.get(f"/lnurlmint/w/{mint_id}", params={"k1": payment_hash})
+    step(4, "GET /w/{mint_id}?k1=<preimage> — query the note")
+    resp = await client.get(f"/lnurlmint/w/{mint_id}", params={"k1": k1})
     w_data = resp.json()
     print(f"  status = {resp.status_code}")
     print(f"  response = {json.dumps(w_data, indent=2)}")
 
-    if resp.status_code != 200 or "status" in w_data and w_data.get("status") == "ERROR":
-        # The note might not be settled yet — try manual settlement
-        print("  Note not found yet — triggering manual settlement...")
-        # Settle via direct DB call (simulates the background reconcile)
-        resp2 = await client.get(
-            f"/lnurlmint/verify/{mint_id}/{payment_hash}"
-        )
-        print(f"  verify response: {resp2.status_code} {resp2.text[:200]}")
-        # Re-query
-        resp = await client.get(f"/lnurlmint/w/{mint_id}", params={"k1": payment_hash})
-        w_data = resp.json()
-        print(f"  re-query response = {json.dumps(w_data, indent=2)}")
-
     if "maxWithdrawable" in w_data:
         note_value = w_data["maxWithdrawable"]
-        print(f"  ✅ Note found! value = {note_value} msat")
+        print(f"  Note found! value = {note_value} msat")
+        if "c" in w_data:
+            print(f"  cs1 certificate = {w_data['c'][:50]}...")
+        if "mintPubkey" in w_data:
+            print(f"  mintPubkey = {w_data['mintPubkey']}")
     else:
-        print("  ⚠️  Note not materialized — check if payment settled")
-        print("     For real external payments, the preimage from your wallet")
-        print("     is the k1. For internal payments, settlement may need")
-        print("     manual triggering.")
+        print("  Note not materialized — check if payment settled")
         await client.aclose()
         return
 
     # ── Step 5: Rotate the note ─────────────────────────────────
-    step(5, "GET /w/cb/{mint_id} — rotate the note")
+    step(5, "GET /w/cb/{mint_id}?k1=&p1= — rotate the note")
     new_preimage, new_h = gen_preimage()
     print(f"  new preimage = {new_preimage}")
     print(f"  new h (sha256) = {new_h}")
     resp = await client.get(
         f"/lnurlmint/w/cb/{mint_id}",
-        params={"k1": payment_hash, "h": new_h},
+        params={"k1": k1, "p1": new_h},
     )
     rot_data = resp.json()
     print(f"  status = {resp.status_code}")
     print(f"  response = {json.dumps(rot_data, indent=2)}")
     if rot_data.get("status") == "OK":
-        print("  ✅ Note rotated!")
-        if "sig" in rot_data:
-            print(f"  sig = {rot_data['sig']}")
+        print("  Note rotated!")
+        if "c" in rot_data:
+            print(f"  cs1 = {rot_data['c'][:50]}...")
     else:
-        print(f"  ❌ Rotate failed: {rot_data}")
+        print(f"  Rotate failed: {rot_data}")
         await client.aclose()
         return
 
     # ── Step 6: Query the rotated note ──────────────────────────
-    step(6, "GET /w/{mint_id}?k1={new_preimage} — query rotated note")
+    step(6, "GET /w/{mint_id}?k1=<new preimage> — query rotated note")
     resp = await client.get(f"/lnurlmint/w/{mint_id}", params={"k1": new_preimage})
     w2_data = resp.json()
     print(f"  status = {resp.status_code}")
     print(f"  response = {json.dumps(w2_data, indent=2)}")
     if "maxWithdrawable" in w2_data:
-        print(f"  ✅ Rotated note found! value = {w2_data['maxWithdrawable']} msat")
+        print(f"  Rotated note found! value = {w2_data['maxWithdrawable']} msat")
     else:
-        print(f"  ❌ Rotated note not found: {w2_data}")
+        print(f"  Rotated note not found: {w2_data}")
 
     # ── Step 7: Melt the note back to sats ──────────────────────
     step(7, "Melt the note — create an invoice and melt into it")
@@ -182,7 +168,7 @@ async def run(mint_id: str, owner_key: str, payer_key: str, amount_msat: int):
         json={"out": False, "amount": amount_msat // 1000, "memo": "melt target"},
     )
     if resp.status_code > 201:
-        print(f"  ❌ Failed to create melt target invoice: {resp.text}")
+        print(f"  Failed to create melt target invoice: {resp.text}")
         await client.aclose()
         return
     melt_pr = resp.json()["payment_request"]
@@ -196,11 +182,11 @@ async def run(mint_id: str, owner_key: str, payer_key: str, amount_msat: int):
     print(f"  status = {resp.status_code}")
     print(f"  response = {json.dumps(melt_data, indent=2)}")
     if melt_data.get("status") == "OK":
-        print("  ✅ Melt initiated! Note reserved, payment in progress.")
+        print("  Melt initiated! Note reserved, payment in progress.")
         if "verify" in melt_data:
             print(f"  verify = {melt_data['verify']}")
     else:
-        print(f"  ❌ Melt failed: {melt_data}")
+        print(f"  Melt failed: {melt_data}")
 
     # Wait for melt to settle
     await asyncio.sleep(3)
@@ -210,11 +196,11 @@ async def run(mint_id: str, owner_key: str, payer_key: str, amount_msat: int):
     print(f"  Mint ID       = {mint_id}")
     print(f"  Amount        = {amount_msat} msat ({amount_msat // 1000} sats)")
     print(f"  Payment hash  = {payment_hash}")
-    print(f"  Original note = {payment_hash}")
-    print(f"  Rotated note  = sha256({new_preimage}) = {new_h}")
+    print(f"  Original k1   = {k1}")
+    print(f"  Rotated k1    = {new_preimage}")
     print(f"  Melt target   = {melt_pr[:40]}...")
     print()
-    print("  ✅ Full lifecycle complete: mint → query → rotate → query → melt")
+    print("  Full lifecycle complete: mint → query → rotate → query → melt")
 
     await client.aclose()
 

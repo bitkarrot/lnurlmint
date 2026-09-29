@@ -22,8 +22,8 @@ Releasing the payment lets ``_melt_pay`` complete and finalize the note.
 
 import asyncio
 
-import pytest
 import bolt11
+import pytest
 
 from lnurlmint.crud import get_note, mark_pending
 from lnurlmint.services import (

@@ -44,14 +44,21 @@ def lnurlmint_start():
     from lnbits.tasks import create_permanent_unique_task
 
     from .services import boot_reconcile
-    from .tasks import wait_for_melt_reconcile
+    from .tasks import wait_for_melt_reconcile, wait_for_zap_receipts
 
     # Boot-time one-shot reconcile (resolves stranded notes from a
-    # crashed process before the periodic task starts).
-    asyncio.create_task(boot_reconcile())
+    # crashed process before the periodic task starts). Held in
+    # scheduled_tasks so it isn't garbage-collected mid-flight.
+    task = asyncio.create_task(boot_reconcile())
+    scheduled_tasks.append(task)
 
     # Periodic reconcile (every 60s).
     task = create_permanent_unique_task("ext_lnurlmint", wait_for_melt_reconcile)
+    scheduled_tasks.append(task)
+
+    # Periodic NIP-57 zap-receipt publishing (every 5s; a cheap no-op
+    # while no mint has zaps enabled).
+    task = create_permanent_unique_task("ext_lnurlmint", wait_for_zap_receipts)
     scheduled_tasks.append(task)
 
 

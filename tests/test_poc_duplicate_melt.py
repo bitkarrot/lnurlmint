@@ -14,13 +14,14 @@ response machinery), so the note stays pending between the two calls —
 exactly the window the guard protects.
 """
 
-import pytest
-from fastapi import BackgroundTasks
 from unittest.mock import MagicMock
 
+import pytest
+from fastapi import BackgroundTasks
+
 from lnurlmint.crud import get_note
+from lnurlmint.tests.conftest import TEST_MINT_ID, fake_invoice, mint_note
 from lnurlmint.views_lnurl import get_withdraw_callback
-from lnurlmint.tests.conftest import fake_invoice, mint_note, TEST_MINT_ID
 
 VALUE = 50_000
 

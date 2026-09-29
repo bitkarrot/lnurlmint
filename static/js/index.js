@@ -264,6 +264,36 @@ const LNURLMINT_TEMPLATE = `
                 class="q-ml-md"
               />
             </div>
+            <div class="row items-center q-mb-md">
+              <q-toggle
+                v-model="createDialog.data.registration_enabled"
+                label="Username Registration"
+              />
+              <q-toggle
+                v-model="createDialog.data.nip05_enabled"
+                label="NIP-05"
+                class="q-ml-md"
+              />
+              <q-toggle
+                v-model="createDialog.data.zaps_enabled"
+                label="Zaps (NIP-57)"
+                class="q-ml-md"
+              />
+            </div>
+            <q-input
+              filled
+              v-model="createDialog.data.zap_relays"
+              label="Zap Relays"
+              hint="Extra wss:// relays for zap receipts (space separated)"
+              class="q-mb-md"
+            ></q-input>
+            <q-input
+              filled
+              v-model="createDialog.data.sunset_date"
+              label="Sunset Date"
+              hint="LUD-25 sunset timestamp, unix seconds (optional)"
+              class="q-mb-md"
+            ></q-input>
             <div class="row justify-end">
               <q-btn
                 flat
@@ -356,6 +386,36 @@ const LNURLMINT_TEMPLATE = `
                 class="q-ml-md"
               />
             </div>
+            <div class="row items-center q-mb-md">
+              <q-toggle
+                v-model="editDialog.data.registration_enabled"
+                label="Username Registration"
+              />
+              <q-toggle
+                v-model="editDialog.data.nip05_enabled"
+                label="NIP-05"
+                class="q-ml-md"
+              />
+              <q-toggle
+                v-model="editDialog.data.zaps_enabled"
+                label="Zaps (NIP-57)"
+                class="q-ml-md"
+              />
+            </div>
+            <q-input
+              filled
+              v-model="editDialog.data.zap_relays"
+              label="Zap Relays"
+              hint="Extra wss:// relays for zap receipts (space separated)"
+              class="q-mb-md"
+            ></q-input>
+            <q-input
+              filled
+              v-model="editDialog.data.sunset_date"
+              label="Sunset Date"
+              hint="LUD-25 sunset timestamp, unix seconds (optional)"
+              class="q-mb-md"
+            ></q-input>
             <div class="row justify-end">
               <q-btn
                 flat
@@ -412,6 +472,11 @@ window.PageLnurlmint = {
           min_mint_msat: 10000,
           verify_enabled: true,
           sunset_mint: false,
+          registration_enabled: true,
+          nip05_enabled: true,
+          zaps_enabled: false,
+          zap_relays: '',
+          sunset_date: '',
           base_url: '',
           onion_url: ''
         }
@@ -429,6 +494,11 @@ window.PageLnurlmint = {
           min_mint_msat: 10000,
           verify_enabled: true,
           sunset_mint: false,
+          registration_enabled: true,
+          nip05_enabled: true,
+          zaps_enabled: false,
+          zap_relays: '',
+          sunset_date: '',
           base_url: '',
           onion_url: ''
         }
@@ -449,6 +519,11 @@ window.PageLnurlmint = {
         min_mint_msat: 10000,
         verify_enabled: true,
         sunset_mint: false,
+        registration_enabled: true,
+        nip05_enabled: true,
+        zaps_enabled: false,
+        zap_relays: '',
+        sunset_date: '',
         base_url: '',
         onion_url: ''
       }
@@ -465,6 +540,11 @@ window.PageLnurlmint = {
         min_mint_msat: mint.min_mint_msat,
         verify_enabled: mint.verify_enabled,
         sunset_mint: mint.sunset_mint,
+        registration_enabled: mint.registration_enabled,
+        nip05_enabled: mint.nip05_enabled,
+        zaps_enabled: mint.zaps_enabled,
+        zap_relays: mint.zap_relays || '',
+        sunset_date: mint.sunset_date || '',
         base_url: mint.base_url || '',
         onion_url: mint.onion_url || ''
       }

@@ -18,7 +18,6 @@ monkeypatching settings).
 
 import asyncio
 import json
-from hashlib import sha256
 from unittest.mock import MagicMock
 
 import bolt11
@@ -72,7 +71,11 @@ def _verify_body(resp) -> dict:
 @pytest.mark.anyio
 async def test_verify_url_absent_by_default(node, db_setup):
     """verify is not advertised in /p/cb when verify_enabled is off."""
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
+    await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=False)
+    _, comment = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), VALUE, comment=comment
+    )
     assert "verify" not in resp, resp
 
 
@@ -91,14 +94,37 @@ async def test_verify_url_advertised_when_enabled(node, db_setup):
 
 
 @pytest.mark.anyio
-async def test_verify_url_absent_without_comment(node, db_setup):
-    """Per LUD-25's Security considerations, SERVICE MUST NOT offer verify
-    in the no-comment fallback: there the preimage IS the note's entire
-    bearer secret, and verify would hand it to anyone holding the URL."""
+async def test_verify_refuses_a_legacy_no_comment_mint(node, db_setup):
+    """Per LUD-25's Security considerations, SERVICE MUST NOT serve the
+    preimage for a legacy NO-comment mint (migrated pre-taproot records
+    carry comment_protected=0): there the preimage IS the note's entire
+    bearer secret, and verify would hand it to anyone holding the URL.
+
+    New mints can't produce this shape anymore (comment is mandatory);
+    this simulates a migrated record by inserting one directly."""
     await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=True)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
-    assert "verify" not in resp, resp
-    payment_hash = bolt11.decode(resp["pr"]).payment_hash
+    from lnurlmint.crud import db
+
+    payment = await node.create_invoice(
+        wallet_id=TEST_WALLET, amount=VALUE // 1000
+    )
+    payment_hash = payment.payment_hash
+    # a migrated no-comment record: note_id = Q(payment_hash), flag 0
+    from lnurlmint.taproot import preimage_note
+
+    note_id = preimage_note(bytes.fromhex(payment_hash))[0].hex()
+    await db.execute(
+        "INSERT INTO lnurlmint.mints_records "
+        "(payment_hash, mint_id, pr, amount_msat, minted, note_id, "
+        "comment_protected) VALUES (:ph, :mid, :pr, :amt, 0, :nid, 0)",
+        {
+            "ph": payment_hash,
+            "mid": TEST_MINT_ID,
+            "pr": payment.bolt11,
+            "amt": VALUE,
+            "nid": note_id,
+        },
+    )
     _assert_404(await verify_invoice(TEST_MINT_ID, payment_hash))
     node.settled.add(payment_hash)
     # ...even after settlement, when the preimage would otherwise be served
@@ -188,7 +214,7 @@ async def test_verify_stays_settled_after_the_note_is_spent(node, db_setup):
     # Rotate the note (burn + mint a new one)
     _, h = fresh_secret()
     rotated = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[secret], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[secret], p1=h
     )
     assert rotated["status"] == "OK", rotated
 
@@ -210,7 +236,10 @@ async def test_verify_endpoint_is_disabled_entirely_when_verify_enabled_is_false
     """VERIFY_ENABLED=false is a real off switch, not just a hidden URL:
     the endpoint 404s even when hit directly with a known payment_hash."""
     await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=False)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
+    _, comment = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), VALUE, comment=comment
+    )
     assert "verify" not in resp, resp
     payment_hash = bolt11.decode(resp["pr"]).payment_hash
     _assert_404(await verify_invoice(TEST_MINT_ID, payment_hash))
@@ -270,9 +299,7 @@ async def test_melt_verify_reports_settled_and_a_matching_preimage_once_paid(
     node.preimages[payment_hash] = melt_preimage
 
     bt = BackgroundTasks()
-    resp = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), bt, k1=[k1], pr=pr
-    )
+    await get_withdraw_callback(TEST_MINT_ID, MagicMock(), bt, k1=[k1], pr=pr)
     await bt()  # run the background _melt_pay task to completion
 
     result = _verify_body(await verify_invoice(TEST_MINT_ID, payment_hash))
@@ -295,9 +322,7 @@ async def test_melt_verify_reports_unsettled_while_genuinely_pending(
     payment_hash = bolt11.decode(pr).payment_hash
 
     bt = BackgroundTasks()
-    resp = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), bt, k1=[k1], pr=pr
-    )
+    await get_withdraw_callback(TEST_MINT_ID, MagicMock(), bt, k1=[k1], pr=pr)
     # Run the background _melt_pay task — it blocks at pay_invoice
     # (InFlightNode blocks on pay_release)
     task = asyncio.create_task(bt())

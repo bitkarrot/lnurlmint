@@ -28,15 +28,14 @@ Three scenarios are pinned:
    payment is actually still in flight).
 """
 
-import pytest
-
 import bolt11
+import pytest
 
 from lnurlmint.crud import get_note, mark_pending
 from lnurlmint.services import (
+    _melt_in_flight,
     _melt_pay,
     _track_melt_start,
-    _melt_in_flight,
     reconcile_pending_melts,
 )
 from lnurlmint.tests.conftest import fake_invoice, mint_note

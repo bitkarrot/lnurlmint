@@ -39,6 +39,7 @@ from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     fake_invoice,
     fresh_secret,
+    k1_id,
     mint_note,
 )
 from lnurlmint.views_lnurl import get_withdraw_callback
@@ -47,7 +48,7 @@ GARBAGE_ID = "ff" * 32  # well-formed note id that was never minted
 
 
 def _note_id(k1: str) -> str:
-    return sha256(bytes.fromhex(k1)).hexdigest()
+    return k1_id(k1)
 
 
 async def _is_pending(note_id: str) -> bool:
@@ -75,7 +76,7 @@ async def test_a3_http_melt_rejects_multiple_k1s_before_any_reservation(
     _, h = fresh_secret()
     rotate = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1a], h=h,
+        k1=[k1a], p1=h,
     )
     assert rotate["status"] == "OK", rotate
 
@@ -106,7 +107,7 @@ async def test_a3_mark_pending_validates_every_id_at_any_position(
     assert (
         await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[spent_k1], h=h,
+            k1=[spent_k1], p1=h,
         )
     )["status"] == "OK"
     with pytest.raises(ValueError, match="Invalid or already spent k1"):
@@ -127,7 +128,7 @@ async def test_a3_mark_pending_validates_every_id_at_any_position(
     assert (
         await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[real_k1], h=h2,
+            k1=[real_k1], p1=h2,
         )
     )["status"] == "OK"
 

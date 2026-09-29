@@ -26,7 +26,6 @@ TestClient), fee settings updated via update_mint (not monkeypatching
 global settings), note values read via get_note (not notes.note_amount).
 """
 
-from hashlib import sha256
 from unittest.mock import MagicMock
 
 import bolt11
@@ -35,18 +34,20 @@ from fastapi import BackgroundTasks
 
 from lnurlmint.crud import get_note, update_mint
 from lnurlmint.services import _mint_fee_msat, _try_settle_mint
-from lnurlmint.views_lnurl import get_pay_callback, get_withdraw_callback
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     TEST_WALLET,
+    bearer_id,
     fake_invoice,
     fresh_secret,
-    mint_note,
+    k1_hash,
+    k1_id,
 )
+from lnurlmint.views_lnurl import get_pay_callback, get_withdraw_callback
 
 
 def _note_id(k1: str) -> str:
-    return sha256(bytes.fromhex(k1)).hexdigest()
+    return k1_id(k1)
 
 
 class Ledger:
@@ -76,13 +77,15 @@ class Ledger:
 
     async def mint(self, gross_msat: int) -> str:
         mint = await self._mint_row()
-        resp = await get_pay_callback(TEST_MINT_ID, MagicMock(), amount=gross_msat)
+        k1, h = fresh_secret()
+        resp = await get_pay_callback(
+            TEST_MINT_ID, MagicMock(), amount=gross_msat, comment=h
+        )
         assert resp.get("pr"), resp
         pr = resp["pr"]
         decoded = bolt11.decode(pr)
         payment_hash = decoded.payment_hash
-        k1 = self.node.preimages[payment_hash]
-        note_id = sha256(bytes.fromhex(k1)).hexdigest()
+        note_id = bearer_id(h)
         self.node.settled.add(payment_hash)
         await _try_settle_mint(note_id, mint)
         note = await get_note(note_id, mint.id)
@@ -103,12 +106,12 @@ class Ledger:
         secret, h = fresh_secret()
         resp = await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[k1], h=h,
+            k1=[k1], p1=h,
         )
         assert resp["status"] == "OK", resp
         self.ids.remove(_note_id(k1))
-        self.ids.append(h)
-        new_note = await get_note(h, mint.id)
+        self.ids.append(bearer_id(h))
+        new_note = await get_note(bearer_id(h), mint.id)
         assert new_note.amount_msat == old  # rotate is value-neutral
         await self.assert_conserved()
         return secret
@@ -122,15 +125,15 @@ class Ledger:
         secret_change, h2 = fresh_secret()
         resp = await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[k1], h=h, h2=h2, amount=amount_msat,
+            k1=[k1], p1=h, p2=h2, amount=amount_msat,
         )
         assert resp["status"] == "OK", resp
         change = total - amount_msat - mint.base_fee_msat
         self.fees += mint.base_fee_msat
         self.ids.remove(_note_id(k1))
-        self.ids.extend([h, h2])
-        amount_note = await get_note(h, mint.id)
-        change_note = await get_note(h2, mint.id)
+        self.ids.extend([bearer_id(h), bearer_id(h2)])
+        amount_note = await get_note(bearer_id(h), mint.id)
+        change_note = await get_note(bearer_id(h2), mint.id)
         assert amount_note.amount_msat == amount_msat
         assert change_note.amount_msat == change
         await self.assert_conserved()
@@ -146,15 +149,15 @@ class Ledger:
         secret, h = fresh_secret()
         resp = await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=k1s, h=h,
+            k1=k1s, p1=h,
         )
         assert resp["status"] == "OK", resp
         refund = (len(k1s) - 1) * mint.base_fee_msat
         self.refunds += refund
         for k1 in k1s:
             self.ids.remove(_note_id(k1))
-        self.ids.append(h)
-        merged_note = await get_note(h, mint.id)
+        self.ids.append(bearer_id(h))
+        merged_note = await get_note(bearer_id(h), mint.id)
         assert merged_note.amount_msat == sum(values) + refund
         await self.assert_conserved()
         return secret
@@ -297,13 +300,13 @@ async def test_dust_split_edges(ledger: Ledger, fee_settings):
     _, h2 = fresh_secret()
     resp = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], h=h, h2=h2, amount=total - 1000,
+        k1=[k1], p1=h, p2=h2, amount=total - 1000,
     )
     assert resp["status"] == "ERROR"
     intact_note = await get_note(_note_id(k1), mint.id)
     assert intact_note.amount_msat == total
-    assert await get_note(h, mint.id) is None
-    assert await get_note(h2, mint.id) is None
+    assert await get_note(bearer_id(h), mint.id) is None
+    assert await get_note(bearer_id(h2), mint.id) is None
     await ledger.assert_conserved()
 
 
@@ -419,11 +422,11 @@ async def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     _, h = fresh_secret()
     resp = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1, k1], h=h,
+        k1=[k1, k1], p1=h,
     )
     assert resp["status"] == "ERROR"
     assert (await get_note(_note_id(k1), mint.id)).amount_msat == 99_000  # intact
-    assert await get_note(h, mint.id) is None  # nothing minted
+    assert await get_note(bearer_id(h), mint.id) is None  # nothing minted
     await ledger.assert_conserved()
 
     # split with h == h2: swap's dedup check rejects, rolls back
@@ -432,11 +435,11 @@ async def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     _, h2_dup = fresh_secret()
     resp = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1b], h=h_dup, h2=h_dup, amount=1000,
+        k1=[k1b], p1=h_dup, p2=h_dup, amount=1000,
     )
     assert resp["status"] == "ERROR"
     assert (await get_note(_note_id(k1b), mint.id)).amount_msat == 99_000
-    assert await get_note(h_dup, mint.id) is None
+    assert await get_note(bearer_id(h_dup), mint.id) is None
     await ledger.assert_conserved()
 
     # merge onto an EXISTING outstanding note id: collision, rolls back
@@ -444,7 +447,7 @@ async def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     existing_id = _note_id(k1)
     resp = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1c], h=existing_id,
+        k1=[k1c], p1=k1_hash(k1),
     )
     assert resp["status"] == "ERROR"
     assert (await get_note(_note_id(k1c), mint.id)).amount_msat == 99_000
@@ -454,7 +457,7 @@ async def test_failed_requests_change_no_value(ledger: Ledger, fee_settings):
     # split amount == total (change would be negative) rejected, no-op
     resp = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], h=h, h2=h2_dup, amount=99_000,
+        k1=[k1], p1=h, p2=h2_dup, amount=99_000,
     )
     assert resp["status"] == "ERROR"
     assert (await get_note(_note_id(k1), mint.id)).amount_msat == 99_000

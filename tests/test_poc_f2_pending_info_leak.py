@@ -12,12 +12,13 @@ then calls the /w endpoint directly and asserts the error response carries
 no withdrawRequest fields (callback, minWithdrawable, maxWithdrawable).
 """
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
 from lnurlmint.crud import get_note, mark_pending
+from lnurlmint.tests.conftest import TEST_MINT_ID, mint_note
 from lnurlmint.views_lnurl import get_withdraw
-from lnurlmint.tests.conftest import mint_note, TEST_MINT_ID
 
 VALUE = 50_000
 

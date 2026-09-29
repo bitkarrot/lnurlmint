@@ -6,21 +6,21 @@ LNbits async fixtures: endpoint functions called directly (not via
 TestClient), per-test DB isolation, FakeNode/InFlightNode with
 controllable tristate behaviour.
 
-- F1/F-3: /verify discloses a settled mint's preimage (= the bearer
-  note's spend secret) to anyone holding only the payment_hash -
-  embedded in the invoice itself. Post-fix this requires
-  verify_enabled=True; false 404s the endpoint entirely.
+- F1/F-3: /verify discloses a settled mint's preimage to anyone holding
+  only the payment_hash — embedded in the invoice itself. Harmless for
+  comment-protected mints (the preimage redeems nothing); still refused
+  for migrated no-comment records. verify_enabled=False 404s the
+  endpoint entirely.
 - F3/F-2: GET /w on a note reserved by an in-flight melt (pending=1)
-  now rejects with the spec's reason "pending" instead of reporting it
+  rejects with the spec's reason "pending" instead of reporting it
   fully withdrawable - the sell-during-melt scam's one lie.
-- F4/F-1: rotating ONTO a pending mint's payment_hash is rejected by
-  the swap guard (ids may never collide with ``mints_records`` rows),
+- F4/F-1: rotating ONTO a pending mint's note_id is rejected by the
+  swap guard (outputs may never collide with ``mints_records`` rows),
   so the victim's settled mint materializes normally.
 """
 
 import asyncio
 import json
-from hashlib import sha256
 from unittest.mock import MagicMock
 
 import bolt11
@@ -28,9 +28,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from lnurlmint.crud import (
-    get_mint_by_id,
     get_note,
-    get_pending_mint_record,
     record_mint_record,
     update_mint,
 )
@@ -38,8 +36,10 @@ from lnurlmint.services import _melt_pay, _track_melt_start, _try_settle_mint
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     TEST_WALLET,
+    bearer_id,
     fake_invoice,
     fresh_secret,
+    k1_id,
     mint_note,
 )
 from lnurlmint.views_lnurl import (
@@ -69,7 +69,10 @@ def _assert_404(resp) -> None:
 async def test_f1_verify_disclosure_requires_verify_enabled(node, db_setup):
     # verify_enabled pinned False; /p/cb does not advertise verify
     await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=False)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
+    victim_k1, victim_comment = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), VALUE, comment=victim_comment
+    )
     assert "verify" not in resp, resp
 
     victim_pr = resp["pr"]
@@ -78,18 +81,16 @@ async def test_f1_verify_disclosure_requires_verify_enabled(node, db_setup):
 
     # an attacker holding only the pr (and thus the payment_hash) gets
     # nothing from the unadvertised endpoint - not even after settlement
-    verify = await verify_invoice(TEST_MINT_ID, payment_hash)
-    _assert_404(verify)
+    _assert_404(await verify_invoice(TEST_MINT_ID, payment_hash))
 
     # the note is the victim's to rotate, at whatever speed they like
-    preimage = node.preimages[payment_hash]
     _, victim_h = fresh_secret()
     rotate = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[preimage], h=victim_h,
+        k1=[victim_k1], p1=victim_h,
     )
     assert rotate["status"] == "OK", rotate
-    note = await get_note(victim_h, TEST_MINT_ID)
+    note = await get_note(bearer_id(victim_h), TEST_MINT_ID)
     assert note is not None and note.amount_msat == VALUE
 
 
@@ -123,7 +124,7 @@ async def test_f3_withdraw_rejects_pending_note_with_spec_reason(
         _, h = fresh_secret()
         rotate = await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[k1], h=h,
+            k1=[k1], p1=h,
         )
         assert rotate["reason"] == "pending"
     finally:
@@ -141,35 +142,36 @@ async def test_f4_rotate_onto_pending_mint_rejected_victim_unharmed(
 ):
     attacker_k1, _, mint = await mint_note(node, PLANT_AMOUNT)
 
-    # victim requests a mint invoice (unpaid); its pr embeds the payment_hash
+    # victim requests a mint invoice (unpaid) with comment=h — its
+    # future note id is bearer_id(h), what the squatter targets
+    victim_secret, victim_h = fresh_secret()
+    victim_note_id = bearer_id(victim_h)
     victim_payment = await node.create_invoice(
         wallet_id=mint.wallet, amount=VALUE // 1000
     )
     victim_ph = victim_payment.payment_hash
-    victim_preimage = victim_payment.preimage
     await record_mint_record(
         payment_hash=victim_ph,
         mint_id=mint.id,
         pr=victim_payment.bolt11,
         amount_msat=VALUE,
+        note_id=victim_note_id,
     )
 
     # the squat attempt fails atomically - nothing planted, nothing burned
     r1 = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[attacker_k1], h=victim_ph,
+        k1=[attacker_k1], p1=victim_h,
     )
-    assert r1 == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r1
-    assert await get_note(victim_ph, mint.id) is None  # no squatter row
-    attacker_id = sha256(bytes.fromhex(attacker_k1)).hexdigest()
-    assert (await get_note(attacker_id, mint.id)).amount_msat == PLANT_AMOUNT
+    assert r1 == {"status": "ERROR", "reason": "already in use"}, r1
+    assert await get_note(victim_note_id, mint.id) is None  # no squatter row
+    assert (await get_note(k1_id(attacker_k1), mint.id)).amount_msat == PLANT_AMOUNT
 
     # victim pays: the mint materializes for its full value, exactly as if
     # the attack never happened
     node.settled.add(victim_ph)
-    note_id = sha256(bytes.fromhex(victim_preimage)).hexdigest()
-    settled = await _try_settle_mint(note_id, mint)
+    settled = await _try_settle_mint(victim_note_id, mint)
     assert settled
-    note = await get_note(victim_ph, mint.id)
+    note = await get_note(victim_note_id, mint.id)
     assert note is not None
     assert note.amount_msat == VALUE

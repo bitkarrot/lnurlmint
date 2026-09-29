@@ -26,9 +26,9 @@ interval setting).
 import pytest
 from pydantic import ValidationError
 
+from lnurlmint.crud import get_mint_by_id, update_mint
 from lnurlmint.models import CreateMint
 from lnurlmint.services import _min_sendable_msat, _mint_fee_msat
-from lnurlmint.crud import get_mint_by_id, update_mint
 from lnurlmint.tests.conftest import TEST_MINT_ID, TEST_WALLET
 
 

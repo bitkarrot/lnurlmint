@@ -8,6 +8,8 @@ function here logs a spendable credential or full request URL (SEC-05).
 """
 
 import asyncio
+import json
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -28,17 +30,20 @@ from .crud import (
     get_mint_id_for_note,
     get_pending_mint_record,
     mark_melt_settled,
+    mark_zap_published,
     melt_pr,
     melt_settled,
     mint_pr,
     mint_settled,
     mint_uses_comment,
     pending_melts,
+    pending_zap_mints,
     restore,
     settle_mint,
+    unpublished_zaps,
+    zaps_enabled_mints,
 )
 from .models import Mint
-from .signing import sign_note
 
 # Retry backoff delays (seconds) for _confirm_payment (Plan 04). Tests
 # monkeypatch this to () for fast execution.
@@ -152,28 +157,20 @@ def _public_base_url(request, mint: Mint) -> str:
 async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
     """Lazy settlement: materialize a note if its invoice has settled.
 
-    Called from the /w endpoint (Plan 03) when a note isn't found in the
-    DB yet — the holder's first poll after payment. Checks the pending
-    mint record, then checks the transaction status live. If settled,
-    calls settle_mint (compare-and-set) to materialize the note.
+    Called when a note isn't found in the DB yet — the holder's first
+    poll after payment (the /w endpoint, a /w/cb redeem, or a `p`
+    hash-lookup). `note_id` is hex(Q) of the note the pending mint
+    credits (the record's own note_id column matches it); the invoice
+    itself stays keyed by payment_hash — check_transaction_status and
+    settle_mint must use record.payment_hash to find and settle the
+    right invoice.
 
-    Returns True if the note was materialized by this call, False
-    otherwise (no pending record, not yet settled, or already settled
-    by a concurrent request).
+    If the funding source is unreachable, returns False rather than
+    propagating a 500 to the LNURL endpoint (W-03).
     """
     record = await get_pending_mint_record(note_id, mint.id)
     if record is None:
         return False
-    # Use record.payment_hash (NOT note_id) for settlement calls. For
-    # no-comment mints, record.payment_hash == note_id (no behavior
-    # change). For comment-protected mints (Phase 4), note_id is the
-    # WALLET-supplied comment_hash but the funding invoice is keyed by
-    # the payment_hash — check_transaction_status and settle_mint must
-    # use the payment_hash to find and settle the right invoice.
-    # If the funding source is unreachable (connection error, timeout),
-    # catch the exception and return False (settlement not confirmed,
-    # try again later) instead of propagating a 500 to the /w or /w/cb
-    # endpoint (W-03 — preserves the LNURL error format invariant).
     try:
         status = await check_transaction_status(mint.wallet, record.payment_hash)
     except Exception as exc:
@@ -186,6 +183,27 @@ async def _try_settle_mint(note_id: str, mint: Mint) -> bool:
         net_amount = await settle_mint(record.payment_hash)
         return net_amount is not None
     return False
+
+
+def spend_domains(request, mint: Mint) -> list[str]:
+    """Every host this mint answers on, for spend domain binding.
+
+    A ck1/cw1 signature binds to the host carried in the note's URL, via
+    the canonical spend transaction's prevout (spend.spend_prevout). This
+    mint accepts every host it actually answers on: the operator's
+    configured base_url and onion_url hosts, plus the host the current
+    request came in on (covers installs where base_url is left unset).
+    Lowercased — domain comparison is case-insensitive."""
+    from urllib.parse import urlparse
+
+    domains: list[str] = []
+    for base in (mint.base_url, mint.onion_url, str(request.base_url)):
+        if not base:
+            continue
+        host = (urlparse(base).hostname or "").lower()
+        if host and host not in domains:
+            domains.append(host)
+    return domains
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +423,7 @@ async def _melt_pay(note_ids: list[str], pr: str, decoded, mint: Mint) -> None:
             # pay_invoice returned a pending Payment (timeout) — fall
             # through to confirmation via _confirm_payment.
             raise PaymentError("Payment timed out", status="pending")
-        except PaymentError as exc:
+        except PaymentError:
             if not decoded.has_payment_hash:
                 logger.error(
                     f"melt {note_ids}: error paying invoice, nothing to "
@@ -533,6 +551,77 @@ async def boot_reconcile() -> None:
         logger.error(f"boot reconcile failed: {exc}")
 
 
-# sign_note is implemented in signing.py (Phase 5 — per-mint keypair,
-# Option B). Re-exported above via `from .signing import sign_note` so
-# `from .services import sign_note` (views_lnurl.py) keeps working.
+# sign_note is implemented in signing.py — per-mint keypair, "Lightning
+# Signed Message" digest, cs1 certificates. Re-exported above via
+# `from .signing import sign_note` so `from .services import sign_note`
+# keeps working.
+
+
+# ---------------------------------------------------------------------------
+# NIP-57 zap receipts (see nostr.py)
+#
+# An unpaid zap invoice is polled for settlement this long after it was
+# issued, and only this many of the newest per round. A zapping client
+# pays at once or not at all, and anyone can mint unpaid zap invoices for
+# free, so the poll must not grow with them. A zap paid outside the
+# window still mints on the next lookup or verify as any invoice does;
+# it just gets no receipt.
+# ---------------------------------------------------------------------------
+_ZAP_POLL_WINDOW_SECONDS = 60 * 60
+_ZAP_POLL_LIMIT = 100
+
+
+def _zaps_offered(mint: Mint) -> bool:
+    """NIP-57 zaps need a per-mint opt-in (mint.zaps_enabled): the
+    funding source must support description_hash invoices for the
+    zap-request binding to mean anything, which LNbits exposes on
+    FakeWallet/lnd/cln-style backends but not everywhere."""
+    return mint.zaps_enabled
+
+
+async def publish_zap_receipts(mint: Mint, now: Optional[int] = None) -> int:
+    """Settle every recently issued zap invoice on this mint (the note
+    lands on the username's branch exactly as any other payment does),
+    then publish a kind 9735 receipt for each settled zap that has none
+    yet: to the relays the zap request named plus the mint's zap_relays.
+    A receipt that no relay takes stays unpublished and is retried next
+    round. Returns how many receipts were published."""
+    import lnurlmint.nostr as nostr_module
+
+    now = int(time.time()) if now is None else now
+    for payment_hash in await pending_zap_mints(
+        mint.id, now - _ZAP_POLL_WINDOW_SECONDS, _ZAP_POLL_LIMIT
+    ):
+        await _try_settle_mint(payment_hash, mint)
+    published = 0
+    extra_relays = [r.strip() for r in mint.zap_relays.split() if r.strip()]
+    for payment_hash, pr, raw in await unpublished_zaps(mint.id):
+        request = json.loads(raw)
+        preimage = await _mint_preimage(payment_hash)
+        receipt = nostr_module.zap_receipt(
+            request, raw, pr, preimage, mint.mint_privkey
+        )
+        relays = list(dict.fromkeys(nostr_module.relays_of(request) + extra_relays))
+        accepted = await nostr_module.publish(relays, receipt)
+        if not accepted:
+            logger.warning(
+                f"zap receipt for a mint invoice on {mint.id} reached no "
+                f"relay of {relays}; will retry"
+            )
+            continue
+        await mark_zap_published(payment_hash, receipt["id"])
+        published += 1
+    return published
+
+
+async def publish_all_zap_receipts() -> None:
+    """The periodic zap task's body: publish_zap_receipts for every mint
+    with zaps enabled. Cheap no-op when none are (a single SELECT)."""
+    for mint_id in await zaps_enabled_mints():
+        mint = await get_mint_by_id(mint_id)
+        if mint is None:
+            continue
+        try:
+            await publish_zap_receipts(mint)
+        except Exception as exc:
+            logger.warning(f"zap receipt publish failed for mint {mint_id}: {exc}")

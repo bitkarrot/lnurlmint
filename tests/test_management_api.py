@@ -12,19 +12,15 @@ import pytest
 from fastapi import HTTPException
 
 from lnurlmint.crud import (
-    create_mint,
-    record_mint_record,
     record_melt,
-    settle_mint,
 )
-from lnurlmint.models import Mint
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     TEST_WALLET,
     fake_invoice,
     mint_note,
 )
-from lnurlmint.views_api import api_get_mint_notes, api_get_mint_activity
+from lnurlmint.views_api import api_get_mint_activity, api_get_mint_notes
 
 OTHER_WALLET = "otherwallet"
 
@@ -74,8 +70,8 @@ async def test_get_notes_empty_for_new_mint(node, db_setup):
 @pytest.mark.anyio
 async def test_get_activity_returns_mint_and_melt_records(node, db_setup):
     """GET /{mint_id}/activity returns both mint and melt records."""
-    from lnurlmint.crud import mark_pending, mark_melt_settled
-    from lnurlmint.services import _track_melt_start, _track_melt_end
+    from lnurlmint.crud import mark_melt_settled, mark_pending
+    from lnurlmint.services import _track_melt_end, _track_melt_start
 
     # Record a mint record (pending mint)
     k1, note_id, mint = await mint_note(node, 5000)

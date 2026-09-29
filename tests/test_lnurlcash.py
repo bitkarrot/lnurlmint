@@ -28,23 +28,25 @@ Key adaptation details:
 
 import asyncio
 import json
-from hashlib import sha256
 from os import urandom
-from typing import Optional
 from unittest.mock import MagicMock
 
 import bolt11
 import pytest
 from fastapi import BackgroundTasks
 
+import lnurlmint.services as services_module
 from lnurlmint.crud import db, get_mint_by_id, get_note, update_mint
 from lnurlmint.services import _melt_fee_limit_msat
-import lnurlmint.services as services_module
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
     TEST_WALLET,
+    bearer_id,
+    cw1_preimage,
     fake_invoice,
     fresh_secret,
+    k1_hash,
+    k1_id,
     mint_note,
     note_value,
 )
@@ -93,12 +95,16 @@ async def test_pay_request_advertises_withdraw_link(db_setup):
 
 
 @pytest.mark.anyio
-async def test_paid_invoice_preimage_becomes_a_bearer_note(node, db_setup):
+async def test_paid_invoice_secret_becomes_a_bearer_note(node, db_setup):
+    """A wallet's OWN preimage becomes the note (comment protection):
+    comment=h on the callback, and the preimage is the k1."""
     await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=5000)
+    k1, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=5000, comment=h
+    )
     assert resp["pr"]
     ph = bolt11.decode(resp["pr"]).payment_hash
-    k1 = node.preimages[ph]
 
     # not settled yet - not a note
     assert await note_value(k1) is None
@@ -110,9 +116,45 @@ async def test_paid_invoice_preimage_becomes_a_bearer_note(node, db_setup):
 
 
 @pytest.mark.anyio
-async def test_pay_callback_advertises_the_lnaddress_as_not_disposable(node, db_setup):
+async def test_pay_callback_requires_a_comment(db_setup):
+    """The invoice preimage is never the note's key: every mint on the
+    fixed identity requires a comment naming an output (cp1 or hex h)."""
     await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0)
     resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=5000)
+    assert resp["status"] == "ERROR"
+    assert "comment" in resp["reason"]
+
+
+@pytest.mark.anyio
+async def test_pay_callback_accepts_a_cp1_comment(node, db_setup):
+    """A cp1<Q> comment mints a non-bearer note keyed by Q."""
+    from coincurve import PrivateKey
+
+    from lnurlmint.tests.conftest import ck1_for, fresh_p1, note_value_by_p
+
+    await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0)
+    key = PrivateKey()
+    cp1, note_id = fresh_p1(key)
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=5000, comment=cp1
+    )
+    assert resp["pr"]
+    ph = bolt11.decode(resp["pr"]).payment_hash
+    node.settled.add(ph)
+    # checkable without a spend via the p= hash lookup
+    assert await note_value_by_p(cp1) == 5000
+    # spendable by ck1 with the matching key
+    val = await note_value(ck1_for(key))
+    assert val == 5000
+
+
+@pytest.mark.anyio
+async def test_pay_callback_advertises_the_lnaddress_as_not_disposable(node, db_setup):
+    await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0)
+    _, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=5000, comment=h
+    )
     assert resp["disposable"] is False
 
 
@@ -127,7 +169,10 @@ async def test_pay_callback_enforces_sendable_bounds(db_setup):
 @pytest.mark.anyio
 async def test_pay_callback_rejects_while_sunsetting(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0, sunset_mint=True)
-    r = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=5000)
+    _, h = fresh_secret()
+    r = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=5000, comment=h
+    )
     assert r["status"] == "ERROR"
 
 
@@ -155,21 +200,25 @@ async def test_pay_response_advertises_fee_inclusive_min_sendable(node, db_setup
     min_sendable = data["minSendable"]
     assert min_sendable == 11000  # 10000 (min_mint_msat) + 1000 (fee)
 
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=min_sendable)
+    k1, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=min_sendable, comment=h
+    )
     assert resp["pr"]
     ph = bolt11.decode(resp["pr"]).payment_hash
     node.settled.add(ph)
-    k1 = node.preimages[ph]
     assert await note_value(k1) == 10000
 
 
 @pytest.mark.anyio
 async def test_mint_credits_note_net_of_configured_fee(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, base_fee_msat=1000, fee_percent_ppm=2000)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=100000)
+    k1, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=100000, comment=h
+    )
     ph = bolt11.decode(resp["pr"]).payment_hash
     node.settled.add(ph)
-    k1 = node.preimages[ph]
     # 1000 flat + 0.2% of 100000 = 1000 + 200 = 1200, rounded up to 2000
     assert await note_value(k1) == 100000 - 2000
 
@@ -177,10 +226,12 @@ async def test_mint_credits_note_net_of_configured_fee(node, db_setup):
 @pytest.mark.anyio
 async def test_mint_fee_rounds_up_to_the_nearest_sat(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, base_fee_msat=0, fee_percent_ppm=1)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=100000000)
+    k1, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=100000000, comment=h
+    )
     ph = bolt11.decode(resp["pr"]).payment_hash
     node.settled.add(ph)
-    k1 = node.preimages[ph]
     # 0.0001% of 100000000 = 100 msat (0.1 sat) - rounded up to 1000
     assert await note_value(k1) == 100000000 - 1000
 
@@ -208,10 +259,12 @@ async def test_pay_callback_rejects_amount_below_min_mint(db_setup):
 @pytest.mark.anyio
 async def test_mint_succeeds_at_exactly_min_mint(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=10_000)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=10000)
+    k1, h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=10000, comment=h
+    )
     ph = bolt11.decode(resp["pr"]).payment_hash
     node.settled.add(ph)
-    k1 = node.preimages[ph]
     assert await note_value(k1) == 10000
 
 
@@ -256,7 +309,7 @@ async def test_rotate_burns_and_replaces_the_note(node, db_setup):
     k1, _, _ = await mint_note(node, 5000)
     new_k1, h = fresh_secret()
     data = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert data["status"] == "OK"
     assert "k1" not in data
@@ -271,7 +324,7 @@ async def test_split_mints_amount_and_change(node, db_setup):
     change_k1, h2 = fresh_secret()
     data = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=2000, h=h, h2=h2,
+        k1=[k1], amount=2000, p1=h, p2=h2,
     )
     assert data["status"] == "OK"
     assert await note_value(k1) is None
@@ -287,7 +340,7 @@ async def test_split_merges_multiple_k1s_first(node, db_setup):
     change_k1, h2 = fresh_secret()
     data = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[a, b], amount=1000, h=h, h2=h2,
+        k1=[a, b], amount=1000, p1=h, p2=h2,
     )
     assert data["status"] == "OK"
     assert await note_value(a) is None
@@ -304,7 +357,7 @@ async def test_split_rejects_amount_out_of_range(node, db_setup):
     for amount in (0, 5000, 6000):
         r = await get_withdraw_callback(
             TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-            k1=[k1], amount=amount, h=h, h2=h2,
+            k1=[k1], amount=amount, p1=h, p2=h2,
         )
         assert r["status"] == "ERROR"
     assert await note_value(k1) == 5000
@@ -318,7 +371,7 @@ async def test_split_rejects_while_sunsetting(node, db_setup):
     _, h2 = fresh_secret()
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=2000, h=h, h2=h2,
+        k1=[k1], amount=2000, p1=h, p2=h2,
     )
     assert r["status"] == "ERROR"
     assert await note_value(k1) == 5000
@@ -333,14 +386,14 @@ async def test_rotate_merge_and_melt_are_unaffected_by_sunsetting(inflight_node,
 
     new_a, h_a = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a], h=h_a
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a], p1=h_a
     )
     assert r["status"] == "OK"
     assert await note_value(new_a) == 2000
 
     new_bc, h_bc = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[b, c], h=h_bc
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[b, c], p1=h_bc
     )
     assert r["status"] == "OK"
     assert await note_value(new_bc) == 7000
@@ -362,7 +415,7 @@ async def test_merge_burns_all_and_mints_the_sum(node, db_setup):
     b, _, _ = await mint_note(node, 3000)
     new_k1, h = fresh_secret()
     data = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a, b], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a, b], p1=h
     )
     assert data["status"] == "OK"
     assert await note_value(a) is None
@@ -378,7 +431,7 @@ async def test_split_deducts_base_fee_from_change_when_mint_charges_fees(node, d
     change_k1, h2 = fresh_secret()
     data = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=2000, h=h, h2=h2,
+        k1=[k1], amount=2000, p1=h, p2=h2,
     )
     assert data["status"] == "OK"
     assert await note_value(new_k1) == 2000
@@ -393,7 +446,7 @@ async def test_split_does_not_reapply_fee_percent_ppm(node, db_setup):
     change_k1, h2 = fresh_secret()
     data = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=2000, h=h, h2=h2,
+        k1=[k1], amount=2000, p1=h, p2=h2,
     )
     assert data["status"] == "OK"
     assert await note_value(change_k1) == 3000
@@ -407,7 +460,7 @@ async def test_split_rejects_when_change_cannot_cover_the_base_fee(node, db_setu
     _, h2 = fresh_secret()
     result = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=4500, h=h, h2=h2,
+        k1=[k1], amount=4500, p1=h, p2=h2,
     )
     assert result == {"status": "ERROR", "reason": "insufficient value"}
     assert await note_value(k1) == 5000
@@ -421,7 +474,7 @@ async def test_split_rejects_a_zero_value_change_note(node, db_setup):
     _, h2 = fresh_secret()
     result = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=3000, h=h, h2=h2,
+        k1=[k1], amount=3000, p1=h, p2=h2,
     )
     assert result == {"status": "ERROR", "reason": "insufficient value"}
     assert await note_value(k1) == 5000
@@ -436,7 +489,7 @@ async def test_split_ignores_min_mint_msat_on_both_sides(node, db_setup):
     change_k1, h2 = fresh_secret()
     data = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=1, h=h, h2=h2,
+        k1=[k1], amount=1, p1=h, p2=h2,
     )
     assert data["status"] == "OK"
     assert await note_value(new_k1) == 1
@@ -451,7 +504,7 @@ async def test_merge_refunds_base_fee_for_every_extra_note(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, base_fee_msat=500)
     new_k1, h = fresh_secret()
     data = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a, b, c], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a, b, c], p1=h
     )
     assert data["status"] == "OK"
     assert await note_value(new_k1) == 2000 + 3000 + 1000 + 2 * 500
@@ -463,7 +516,7 @@ async def test_rotate_is_unaffected_by_mint_fees(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, base_fee_msat=1000)
     new_k1, h = fresh_secret()
     data = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert data["status"] == "OK"
     assert await note_value(new_k1) == 5000
@@ -573,7 +626,7 @@ async def test_pending_note_rejects_concurrent_operations(inflight_node, db_setu
     # Concurrent operation should be rejected with "pending"
     _, h = fresh_secret()
     concurrent = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
 
     inflight_node.pay_release.set()
@@ -601,7 +654,7 @@ async def test_pending_note_is_released_if_the_payment_fails(inflight_node, db_s
 
     _, h = fresh_secret()
     concurrent = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
 
     inflight_node.pay_release.set()
@@ -654,9 +707,11 @@ async def test_pending_note_is_released_if_funding_source_becomes_unavailable(no
 async def test_melt_rejects_own_pending_invoice(node, db_setup):
     await update_mint(TEST_MINT_ID, TEST_WALLET, min_mint_msat=0)
     k1, _, _ = await mint_note(node, 5000)
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), amount=5000)
+    new_k1, new_h = fresh_secret()
+    resp = await get_pay_callback(
+        TEST_MINT_ID, _mock_request(), amount=5000, comment=new_h
+    )
     pr = resp["pr"]
-    new_k1 = node.preimages[bolt11.decode(pr).payment_hash]
 
     bg = BackgroundTasks()
     result = await get_withdraw_callback(
@@ -671,10 +726,15 @@ async def test_melt_rejects_own_pending_invoice(node, db_setup):
 @pytest.mark.anyio
 async def test_melt_rejects_already_settled_own_invoice(node, db_setup):
     k1, _, _ = await mint_note(node, 5000)
-    settled_k1, settled_note_id, _ = await mint_note(node, 5000)
-    # settled_note_id == sha256(k1) == payment_hash of the mint record
+    settled_k1, _, _ = await mint_note(node, 5000)
     assert await note_value(settled_k1) == 5000
-    pr = fake_invoice(5000, settled_note_id)
+    # the mint record that issued settled_k1: melt into ITS payment hash
+    row = await db.fetchone(
+        "SELECT payment_hash FROM lnurlmint.mints_records "
+        "WHERE mint_id = :mid AND minted = 1",
+        {"mid": TEST_MINT_ID},
+    )
+    pr = fake_invoice(5000, row["payment_hash"])
 
     bg = BackgroundTasks()
     result = await get_withdraw_callback(
@@ -712,14 +772,13 @@ async def test_undeterminable_payment_status_leaves_the_note_pending(node, db_se
     )
     assert resp["status"] == "OK"
     await _run_bg(bg)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
-    note = await get_note(note_id, TEST_MINT_ID)
+    note = await get_note(k1_id(k1), TEST_MINT_ID)
     assert note.amount_msat == 5000
     r = await get_withdraw(TEST_MINT_ID, _mock_request(), k1=k1)
     assert r == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert r == {"status": "ERROR", "reason": "pending"}
 
@@ -736,14 +795,13 @@ async def test_hodl_invoice_attack_leaves_the_note_pending_instead_of_restoring(
     )
     assert resp["status"] == "OK"
     await _run_bg(bg)
-    note_id = sha256(bytes.fromhex(k1)).hexdigest()
-    note = await get_note(note_id, TEST_MINT_ID)
+    note = await get_note(k1_id(k1), TEST_MINT_ID)
     assert note.amount_msat == 5000
     r = await get_withdraw(TEST_MINT_ID, _mock_request(), k1=k1)
     assert r == {"status": "ERROR", "reason": "pending"}
     _, h = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert r == {"status": "ERROR", "reason": "pending"}
 
@@ -787,7 +845,7 @@ async def test_any_invalid_k1_fails_the_whole_request(node, db_setup):
     bogus = urandom(32).hex()
     _, h = fresh_secret()
     result = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1, bogus], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1, bogus], p1=h
     )
     assert result == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     assert await note_value(k1) == 5000
@@ -798,7 +856,7 @@ async def test_duplicate_k1_cannot_be_double_counted(node, db_setup):
     k1, _, _ = await mint_note(node, 5000)
     _, h = fresh_secret()
     result = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1, k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1, k1], p1=h
     )
     assert result == {"status": "ERROR", "reason": "Invalid or already spent k1."}
     assert await note_value(k1) == 5000
@@ -852,7 +910,7 @@ async def test_withdraw_reports_unknown_k1_distinctly_from_spent(node, db_setup)
     k1, _, _ = await mint_note(node, 5000)
     _, h = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert r["status"] == "OK"
     spent = await get_withdraw(TEST_MINT_ID, _mock_request(), k1=k1)
@@ -878,16 +936,17 @@ async def test_no_bearer_secret_is_ever_persisted(node, db_setup):
     change_k1, h2 = fresh_secret()
     await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], amount=2000, h=h, h2=h2,
+        k1=[k1], amount=2000, p1=h, p2=h2,
     )
     notes_rows = await db.fetchall("SELECT * FROM lnurlmint.notes")
     mints_rows = await db.fetchall("SELECT * FROM lnurlmint.mints_records")
     stored = str(notes_rows) + str(mints_rows)
     for secret in (k1, new_k1, change_k1):
         assert secret not in stored
-    assert sha256(bytes.fromhex(k1)).hexdigest() in stored
-    assert h in stored
-    assert h2 in stored
+    # stored ids are output keys (hex Q), never spendable credentials
+    assert k1_id(k1) in stored
+    assert bearer_id(h) in stored
+    assert bearer_id(h2) in stored
 
 
 # ---------------------------------------------------------------------------
@@ -900,12 +959,179 @@ async def test_spent_k1_cannot_be_replayed(node, db_setup):
     k1, _, _ = await mint_note(node, 5000)
     new_k1, h = fresh_secret()
     first = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
     )
     assert first["status"] == "OK"
     _, other_h = fresh_secret()
     second = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], h=other_h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=other_h
     )
     assert second["status"] == "ERROR"
     assert await note_value(new_k1) == 5000
+
+
+# ---------------------------------------------------------------------------
+# Spend forms — the same note opens for its hex preimage and its cw1
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_bearer_note_spends_by_cw1_long_form(node, db_setup):
+    """A 64-hex k1 and the equivalent explicit cw1 spend are the SAME
+    spend: a bearer note opened by cw1 is spent, and the hex preimage no
+    longer opens it."""
+    k1, _, _ = await mint_note(node, 5000)
+    _, h = fresh_secret()
+    data = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(),
+        k1=[cw1_preimage(k1)], p1=h,
+    )
+    assert data["status"] == "OK"
+    # the hex preimage now reports the note as spent
+    spent = await get_withdraw(TEST_MINT_ID, _mock_request(), k1=k1)
+    assert spent == {"status": "ERROR", "reason": "Note already spent."}
+
+
+@pytest.mark.anyio
+async def test_withdraw_by_cw1_echoes_the_literal_spend(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    cw1 = cw1_preimage(k1)
+    r = await get_withdraw(TEST_MINT_ID, _mock_request(), k1=cw1)
+    assert r["k1"] == cw1
+    assert r["maxWithdrawable"] == 5000
+
+
+@pytest.mark.anyio
+async def test_a_wrong_preimage_does_not_open_the_note(node, db_setup):
+    """A preimage that is NOT sha256(h) fails cw1 verification — the
+    kernel-free path executes the preimage leaf exactly."""
+    _, _, _ = await mint_note(node, 5000)
+    wrong = urandom(32).hex()
+    _, h = fresh_secret()
+    r = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(),
+        k1=[cw1_preimage(wrong)], p1=h,
+    )
+    assert r["status"] == "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# LUD-25 "Retrying a mutation" — the same burned set + outputs replays
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_retried_rotate_replays_the_original_result(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    new_k1, h = fresh_secret()
+    first = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
+    )
+    assert first["status"] == "OK"
+    retry = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
+    )
+    # same burn + same p1 = the original result, not "already spent"
+    assert retry == first
+    assert await note_value(new_k1) == 5000
+
+
+@pytest.mark.anyio
+async def test_retried_split_replays_the_original_result(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    new_k1, h = fresh_secret()
+    change_k1, h2 = fresh_secret()
+    first = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(),
+        k1=[k1], amount=2000, p1=h, p2=h2,
+    )
+    assert first["status"] == "OK"
+    retry = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(),
+        k1=[k1], amount=2000, p1=h, p2=h2,
+    )
+    assert retry == first
+    assert await note_value(new_k1) == 2000
+    assert await note_value(change_k1) == 3000
+
+
+@pytest.mark.anyio
+async def test_retried_merge_replays_the_original_result(node, db_setup):
+    a, _, _ = await mint_note(node, 2000)
+    b, _, _ = await mint_note(node, 3000)
+    new_k1, h = fresh_secret()
+    first = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[a, b], p1=h
+    )
+    assert first["status"] == "OK"
+    # merge order does not matter — the burn key sorts the set
+    retry = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[b, a], p1=h
+    )
+    assert retry == first
+    assert await note_value(new_k1) == 5000
+
+
+@pytest.mark.anyio
+async def test_retry_with_a_different_output_is_a_conflict_not_a_replay(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    _, h = fresh_secret()
+    first = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
+    )
+    assert first["status"] == "OK"
+    _, other_h = fresh_secret()
+    conflict = await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=other_h
+    )
+    assert conflict["status"] == "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Hash lookup — checking a note without exposing it (?p=)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_withdraw_by_hash_reports_the_same_note_without_the_secret(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    r = await get_withdraw(TEST_MINT_ID, _mock_request(), p=k1_hash(k1))
+    assert r.get("tag") == "withdrawRequest"
+    assert r["maxWithdrawable"] == 5000
+    assert "k1" not in r  # never echoes what it cannot show for
+
+
+@pytest.mark.anyio
+async def test_withdraw_by_hash_never_burns_the_note(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    await get_withdraw(TEST_MINT_ID, _mock_request(), p=k1_hash(k1))
+    assert await note_value(k1) == 5000
+
+
+@pytest.mark.anyio
+async def test_withdraw_by_hash_rejects_an_unknown_hash(db_setup):
+    _, h = fresh_secret()
+    r = await get_withdraw(TEST_MINT_ID, _mock_request(), p=h)
+    assert r == {"status": "ERROR", "reason": "Unknown note."}
+
+
+@pytest.mark.anyio
+async def test_withdraw_by_hash_reports_a_retained_spent_note(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    _, h = fresh_secret()
+    await get_withdraw_callback(
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[k1], p1=h
+    )
+    r = await get_withdraw(TEST_MINT_ID, _mock_request(), p=k1_hash(k1))
+    assert r == {"status": "ERROR", "reason": "Note already spent."}
+
+
+@pytest.mark.anyio
+async def test_withdraw_requires_exactly_one_of_k1_or_p(node, db_setup):
+    k1, _, _ = await mint_note(node, 5000)
+    both = await get_withdraw(
+        TEST_MINT_ID, _mock_request(), k1=k1, p=k1_hash(k1)
+    )
+    assert both["status"] == "ERROR"
+    neither = await get_withdraw(TEST_MINT_ID, _mock_request())
+    assert neither["status"] == "ERROR"

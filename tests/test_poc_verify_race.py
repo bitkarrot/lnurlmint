@@ -6,55 +6,45 @@ fallback note's entire spend secret) to ANYONE who knew the payment_hash
 (embedded in the invoice itself), letting the first rotater win the note
 regardless of who paid for it.
 
-FIXED by LUD-25 comment protection: SERVICE now refuses verify outright
-for any mint that skipped `comment` — there the preimage is the note's
-whole secret, so the endpoint that used to hand it to any invoice holder
-is closed for that mint instead. A mint that DID use `comment` still gets
-verify served, but its disclosed preimage is no longer the note's secret
-(the WALLET-held `secret` behind `comment` is), so the same theft chain
-fails there too, for a different reason.
-
-``test_theft_chain_closed_by_verify_refusal`` and
-``test_theft_chain_closed_because_comment_makes_the_preimage_harmless``
-below pin both halves of the fix. ``test_verify_disabled_closes_the_hole``
-pins that ``verify_enabled=False`` is a real off switch — the endpoint
-404s entirely (not just its advertisement).
-
-Ported from the source's ``test_poc_verify_race.py``, adapting to LNbits
-async fixtures: endpoint functions called directly (not via TestClient),
-per-test DB isolation, FakeNode with ``get_standalone_payment`` monkeypatch
-for live preimage fetch.
+Under the taproot protocol the whole shape changed: no NEW mint can ever
+be preimage-keyed (a wallet-chosen comment output or a branch-derived key
+is mandatory), so a disclosed preimage is harmless by construction. The
+only preimage-keyed notes left are MIGRATED pre-m004 records
+(comment_protected=0, note_id = Q(payment_hash)) — and verify still
+refuses those outright. These tests pin both halves: migrated notes keep
+working with their old preimage k1, and verify never hands that preimage
+back out.
 """
 
-import asyncio
 import json
-from hashlib import sha256
 from unittest.mock import MagicMock
 
 import bolt11
 import pytest
 from fastapi import BackgroundTasks
 
-from lnurlmint.crud import get_note, get_mint_by_id, update_mint
+from lnurlmint.crud import get_mint_by_id, get_note, update_mint
 from lnurlmint.services import _melt_pay
+from lnurlmint.taproot import preimage_note
 from lnurlmint.tests.conftest import (
     TEST_MINT_ID,
+    TEST_WALLET,
+    bearer_id,
     fake_invoice,
     fresh_secret,
     mint_note,
 )
-from lnurlmint.views_lnurl import get_pay_callback, get_withdraw_callback, verify_invoice
+from lnurlmint.views_lnurl import (
+    get_pay_callback,
+    get_withdraw_callback,
+    verify_invoice,
+)
 
 VALUE = 50_000
 
 
 def _mock_request() -> MagicMock:
-    """A minimal Request mock for /p/cb (which calls _public_base_url).
-
-    The test mint has no ``base_url`` set, so _public_base_url falls back
-    to ``str(request.base_url)`` — a MagicMock stringifies to a stable
-    repr, which is fine for the verify URL (we only assert presence).
-    """
+    """A minimal Request mock for /p/cb (which calls _public_base_url)."""
     req = MagicMock()
     req.base_url = "http://test/"
     return req
@@ -68,45 +58,55 @@ def _assert_404(resp) -> None:
 
 
 def _verify_body(resp) -> dict:
-    """Extract the verify response body from either a JSONResponse (404)
-    or a LnurlPayVerifyResponse model (200)."""
-    if hasattr(resp, "status_code"):
-        return json.loads(resp.body)
-    return resp.dict()
+    """Extract the verify response body from a JSONResponse."""
+    return json.loads(resp.body)
+
+
+async def _legacy_no_comment_mint(node) -> tuple[str, str]:
+    """Simulate a MIGRATED pre-m004 mint record (comment_protected=0):
+    the invoice's own preimage remains the bearer secret — note_id is
+    Q(payment_hash), and verify must keep refusing it forever."""
+    from lnurlmint.crud import db
+
+    payment = await node.create_invoice(wallet_id=TEST_WALLET, amount=VALUE // 1000)
+    payment_hash = payment.payment_hash
+    note_id = preimage_note(bytes.fromhex(payment_hash))[0].hex()
+    await db.execute(
+        "INSERT INTO lnurlmint.mints_records "
+        "(payment_hash, mint_id, pr, amount_msat, minted, note_id, "
+        "comment_protected) VALUES (:ph, :mid, :pr, :amt, 0, :nid, 0)",
+        {
+            "ph": payment_hash,
+            "mid": TEST_MINT_ID,
+            "pr": payment.bolt11,
+            "amt": VALUE,
+            "nid": note_id,
+        },
+    )
+    return payment_hash, node.preimages[payment_hash]
 
 
 @pytest.mark.anyio
 async def test_theft_chain_closed_by_verify_refusal(node, db_setup):
-    """The original theft chain, now closed: a mint that skips `comment`
-    (LUD-25 comment protection) still credits k1=preimage exactly as
-    before, but SERVICE now refuses to serve verify for it at all, even
-    with verify_enabled on — so the attacker's very first step (scraping
-    the preimage from /verify) never gets off the ground."""
-    # Victim requests a mint invoice for 50_000 msat and pays it, WITHOUT
-    # comment protection (a legacy or opted-out wallet).
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
-    assert "verify" not in resp, resp
-    victim_pr = resp["pr"]
-    victim_ph = bolt11.decode(victim_pr).payment_hash  # what the attacker knows
-    node.settled.add(victim_ph)  # the Lightning payment itself
+    """A migrated no-comment mint: the preimage IS still the note's spend
+    secret, so verify refuses to serve it at all — the attacker's first
+    step (scraping the preimage from /verify) never gets off the ground.
+    The note itself still redeems by preimage, exactly as a migrated
+    holder expects."""
+    victim_ph, preimage = await _legacy_no_comment_mint(node)
+    node.settled.add(victim_ph)
 
-    # ATTACKER (knowing only payment_hash): verify is refused outright, no
-    # comment was ever used for this mint.
-    r = await verify_invoice(TEST_MINT_ID, victim_ph)
-    _assert_404(r)
+    # ATTACKER (knowing only payment_hash): verify refused outright.
+    _assert_404(await verify_invoice(TEST_MINT_ID, victim_ph))
 
-    # The victim's own preimage (learned the ordinary way, from paying the
-    # invoice) still redeems the note normally — only the remote-disclosure
-    # endpoint is closed, not the fallback note itself. Verify's refusal
-    # above never touched the lazy-settle path, so the note only actually
-    # materializes here, on the rotate itself.
-    preimage = node.preimages[victim_ph]
+    # The victim's own preimage still redeems the migrated note —
+    # the m004 upgrade did not strand it.
     _, victim_h = fresh_secret()
     r = await get_withdraw_callback(
-        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[preimage], h=victim_h
+        TEST_MINT_ID, MagicMock(), BackgroundTasks(), k1=[preimage], p1=victim_h
     )
     assert r["status"] == "OK", r
-    note = await get_note(victim_h, TEST_MINT_ID)
+    note = await get_note(bearer_id(victim_h), TEST_MINT_ID)
     assert note is not None and note.amount_msat == VALUE
 
 
@@ -114,17 +114,16 @@ async def test_theft_chain_closed_by_verify_refusal(node, db_setup):
 async def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     node, db_setup
 ):
-    """The complementary fix: a WALLET that DOES use LUD-25 comment
-    protection gets verify served normally, but the disclosed preimage is
-    no longer the note's spend secret (the WALLET-held `secret` behind
-    `comment` is) — so an attacker stealing it from /verify gets nothing
-    to rotate, and the theft chain fails at its second step instead."""
+    """The complementary fix: a WALLET that uses comment protection gets
+    verify served normally, but the disclosed preimage is no longer the
+    note's spend secret (the WALLET-held secret behind `comment` is) — so
+    an attacker stealing it from /verify gets nothing to rotate, and the
+    theft chain fails at its second step instead."""
     from lnurlmint.services import _try_settle_mint
 
+    await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=True)
     victim_secret, comment_hash = fresh_secret()
 
-    # /p/cb with comment=comment_hash creates a pending mint keyed by the
-    # WALLET-supplied comment hash and advertises the verify URL.
     resp = await get_pay_callback(
         TEST_MINT_ID, _mock_request(), VALUE, comment=comment_hash
     )
@@ -133,14 +132,15 @@ async def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     victim_ph = bolt11.decode(victim_pr).payment_hash
 
     # Settle the payment and materialize the note (lazy settlement, keyed
-    # by comment_hash — the WALLET's secret, not the payment preimage).
+    # by the comment's output — the WALLET's secret, not the preimage).
     node.settled.add(victim_ph)
-    await _try_settle_mint(comment_hash, await get_mint_by_id(TEST_MINT_ID))
+    mint = await get_mint_by_id(TEST_MINT_ID)
+    await _try_settle_mint(bearer_id(comment_hash), mint)
 
     # ATTACKER: verify is served (comment protection was used) and does
     # disclose the preimage...
     r = await verify_invoice(TEST_MINT_ID, victim_ph)
-    assert not hasattr(r, "status_code"), r  # 200 → model, not JSONResponse
+    assert r.status_code == 200, r
     body = _verify_body(r)
     assert body["settled"] is True, body
     stolen_preimage = body["preimage"]
@@ -150,42 +150,39 @@ async def test_theft_chain_closed_because_comment_makes_the_preimage_harmless(
     _, attacker_h = fresh_secret()
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[stolen_preimage], h=attacker_h,
+        k1=[stolen_preimage], p1=attacker_h,
     )
-    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r
-    assert await get_note(attacker_h, TEST_MINT_ID) is None
+    assert r["status"] == "ERROR", r
+    assert await get_note(bearer_id(attacker_h), TEST_MINT_ID) is None
 
     # Only the victim's own held secret redeems the note, at their leisure —
     # no race to win, since nobody else ever had anything that works.
     _, victim_h = fresh_secret()
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[victim_secret], h=victim_h,
+        k1=[victim_secret], p1=victim_h,
     )
     assert r["status"] == "OK", r
-    note = await get_note(victim_h, TEST_MINT_ID)
+    note = await get_note(bearer_id(victim_h), TEST_MINT_ID)
     assert note is not None and note.amount_msat == VALUE
 
 
 @pytest.mark.anyio
-async def test_verify_refuses_the_no_comment_fallback_before_and_after_settlement(
+async def test_verify_refuses_the_legacy_fallback_before_and_after_settlement(
     node, db_setup
 ):
-    """The old exposure window in one picture, now closed at both points in
-    time: from the moment /p/cb answers, /verify/{ph} 404s for ANY holder of
+    """The old exposure window in one picture, now closed at both points
+    in time for migrated records: /verify/{ph} 404s for ANY holder of
     the payment_hash of a no-comment mint — both while unpaid and once
-    settled, never just its advertisement."""
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
-    ph = bolt11.decode(resp["pr"]).payment_hash
+    settled."""
+    victim_ph, _ = await _legacy_no_comment_mint(node)
 
     # Before settlement — verify 404s.
-    r = await verify_invoice(TEST_MINT_ID, ph)
-    _assert_404(r)
+    _assert_404(await verify_invoice(TEST_MINT_ID, victim_ph))
 
     # After settlement — verify still 404s.
-    node.settled.add(ph)
-    r = await verify_invoice(TEST_MINT_ID, ph)
-    _assert_404(r)
+    node.settled.add(victim_ph)
+    _assert_404(await verify_invoice(TEST_MINT_ID, victim_ph))
 
 
 @pytest.mark.anyio
@@ -195,6 +192,7 @@ async def test_melt_direction_verify_is_harmless(node, db_setup):
     notes that funded the melt are burned by the time the preimage appears,
     and the melt preimage keys no note — rotating with it fails as
     unknown."""
+    await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=True)
     k1, note_id, mint = await mint_note(node, VALUE)
 
     # Victim melts their note into an external invoice.
@@ -206,7 +204,7 @@ async def test_melt_direction_verify_is_harmless(node, db_setup):
     # the note and calls mark_melt_settled (settled=1 in melts table).
     decoded = bolt11.decode(melt_invoice)
     from lnurlmint.crud import mark_pending, record_melt
-    from lnurlmint.services import _track_melt_start, _track_melt_end
+    from lnurlmint.services import _track_melt_start
 
     await mark_pending([note_id], melt_ph, mint.id)
     await _track_melt_start(melt_ph)
@@ -224,7 +222,7 @@ async def test_melt_direction_verify_is_harmless(node, db_setup):
 
     # Attacker polls the melt's verify once it completes.
     r = await verify_invoice(TEST_MINT_ID, melt_ph)
-    assert not hasattr(r, "status_code"), r  # 200 → model, not JSONResponse
+    assert r.status_code == 200, r
     body = _verify_body(r)
     assert body["settled"] is True, body
     assert body["preimage"] == melt_preimage, body
@@ -235,44 +233,39 @@ async def test_melt_direction_verify_is_harmless(node, db_setup):
     _, attacker_h = fresh_secret()
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[melt_preimage], h=attacker_h,
+        k1=[melt_preimage], p1=attacker_h,
     )
-    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r
-    assert await get_note(attacker_h, TEST_MINT_ID) is None
+    assert r["status"] == "ERROR", r
+    assert await get_note(bearer_id(attacker_h), TEST_MINT_ID) is None
 
     # And the original note's secret is equally dead (already burned).
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[k1], h=attacker_h,
+        k1=[k1], p1=attacker_h,
     )
-    assert r == {"status": "ERROR", "reason": "Invalid or already spent k1."}, r
+    assert r["status"] == "ERROR", r
 
 
 @pytest.mark.anyio
 async def test_verify_disabled_closes_the_hole(node, db_setup):
-    """The review's fix: with verify_enabled=False (a REAL off switch),
-    the endpoint 404s even for a settled mint whose preimage is there for
-    the taking — an observer holding the payment_hash learns nothing, and
+    """With verify_enabled=False (a REAL off switch), the endpoint 404s
+    even for a settled migrated mint whose preimage is there for the
+    taking — an observer holding the payment_hash learns nothing, and
     the victim's slow manual rotate succeeds untouched."""
-    # Disable verify on the test mint.
-    await update_mint(TEST_MINT_ID, "testwallet", verify_enabled=False)
+    await update_mint(TEST_MINT_ID, TEST_WALLET, verify_enabled=False)
 
-    resp = await get_pay_callback(TEST_MINT_ID, _mock_request(), VALUE)
-    assert "verify" not in resp, resp  # not advertised when disabled
-    victim_ph = bolt11.decode(resp["pr"]).payment_hash
+    victim_ph, preimage = await _legacy_no_comment_mint(node)
     node.settled.add(victim_ph)
 
     # The attacker polls verify exactly as in the theft chain above...
-    r = await verify_invoice(TEST_MINT_ID, victim_ph)
-    _assert_404(r)
+    _assert_404(await verify_invoice(TEST_MINT_ID, victim_ph))
 
     # ...and the victim rotates at human speed, unhurried and unrobbed.
-    preimage = node.preimages[victim_ph]
     _, victim_h = fresh_secret()
     r = await get_withdraw_callback(
         TEST_MINT_ID, MagicMock(), BackgroundTasks(),
-        k1=[preimage], h=victim_h,
+        k1=[preimage], p1=victim_h,
     )
     assert r["status"] == "OK", r
-    note = await get_note(victim_h, TEST_MINT_ID)
+    note = await get_note(bearer_id(victim_h), TEST_MINT_ID)
     assert note is not None and note.amount_msat == VALUE
